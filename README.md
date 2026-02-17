@@ -1,4 +1,4 @@
-# federated-conditional-diffusion-ecg
+# federated-conditional-diffusion-time-series
 Hierarchical federated conditional diffusion model for ECG time-series forecasting with uncertainty quantification (MIT-BIH dataset).
 
 ## Federated Conditional Diffusion Models for ECG Time-Series Forecasting
