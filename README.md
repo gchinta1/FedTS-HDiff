@@ -148,7 +148,7 @@ MITBIH_DIR = "mit-bih-arrhythmia-database-1.0.0"
 ### Running the Experiment
 
 ```bash
-python final-times.py
+python main_fedphd.py
 ```
 
 Training will:
