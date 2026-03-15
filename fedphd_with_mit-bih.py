@@ -56,7 +56,7 @@ DDIM_ETA = 0.0
 
 LR = 1e-4
 
-OUT_DIR = "name_your_folder"
+OUT_DIR = "path_to_your_folder"
 os.makedirs(OUT_DIR, exist_ok=True)
 
 
