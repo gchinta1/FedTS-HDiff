@@ -14,9 +14,9 @@ from torch.utils.data import Dataset, DataLoader, Subset
 import matplotlib.pyplot as plt
 
 
-PTBXL_ROOT = r"ptb-xl-a-large-publicly-available-electrocardiography-dataset-1.0.3"
+PTBXL_ROOT = r"path_to_your_dataset"
 DATA_DIR = os.path.join(PTBXL_ROOT, "records100")
-OUT_DIR = "ptbxl_fedphd_fixed_forecasting_ddim_64_64"
+OUT_DIR = "path_to_your_folder"
 os.makedirs(OUT_DIR, exist_ok=True)
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
