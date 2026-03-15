@@ -12,7 +12,7 @@ from torch.utils.data import Dataset, DataLoader, Subset
 import matplotlib.pyplot as plt
 
 
-MITBIH_DIR = r"mit-bih-arrhythmia-database-1.0.0"
+MITBIH_DIR = r"path_to_your_dataset"
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 print("Using device:", device)
@@ -51,14 +51,14 @@ T_TRAIN = 500
 BETA_START = 1e-4
 BETA_END = 0.02
 
-
 DDIM_STEPS = 200
 DDIM_ETA = 0.0
 
 LR = 1e-4
 
-OUT_DIR = "final_mitbih_fed_forecasting_ddim_64_64"
+OUT_DIR = "name_your_folder"
 os.makedirs(OUT_DIR, exist_ok=True)
+
 
 # Lists all MIT-BIH record IDs (.hea files) inside the dataset directory.
 def list_record_ids(mitbih_dir: str) -> List[str]:
@@ -67,6 +67,7 @@ def list_record_ids(mitbih_dir: str) -> List[str]:
         if f.endswith(".hea"):
             recs.append(os.path.splitext(f)[0])
     return sorted(list(set(recs)))
+
 
 # Applies robust z-score normalization and clips signal to [-1,1].
 def robust_zscore_to_minus1_1(x: np.ndarray) -> np.ndarray:
@@ -78,7 +79,7 @@ def robust_zscore_to_minus1_1(x: np.ndarray) -> np.ndarray:
 
 
 # Extracts heartbeat windows centered at R-peaks.
-# Each window = [past(64) | future(64)] → total 128 samples.
+# Each window = [past(64) | future(64)] -> total 128 samples.
 def extract_beats_for_record(
     mitbih_dir: str,
     rec_id: str,
@@ -131,7 +132,6 @@ def extract_beats_for_record(
 # Builds federated clients.
 # Each ECG record becomes one client with its local beats and labels.
 def build_federated_clients_from_mitbih(
-
     mitbih_dir: str,
 ) -> Tuple[List[np.ndarray], List[np.ndarray], Dict[str, int]]:
     rec_ids = list_record_ids(mitbih_dir)
@@ -253,6 +253,7 @@ def extract(a: torch.Tensor, t: torch.Tensor, x_shape):
     out = a.gather(-1, t)
     return out.view(-1, *([1] * (len(x_shape) - 1)))
 
+
 # Forward diffusion step: adds noise to the true future.
 def q_sample(x0, t, noise=None):
     if noise is None:
@@ -261,6 +262,7 @@ def q_sample(x0, t, noise=None):
     sqrt_om = extract(sqrt_one_minus_alphas_cumprod, t, x0.shape)
     x_t = sqrt_ac * x0 + sqrt_om * noise
     return x_t, noise
+
 
 # Generates sinusoidal time embeddings for diffusion timestep conditioning.
 class TimeEmbedding(nn.Module):
@@ -358,13 +360,11 @@ class UNet1D(nn.Module):
 
 # Returns initialized diffusion forecasting model.
 def get_diffusion_model():
-
     return UNet1D(in_ch=2, out_ch=1, base_ch=32, time_dim=128).to(device)
 
 
 # Splits full window (128) into past(64) and future(64).
 def split_past_future(x_full: torch.Tensor):
-
     # x_full: (B,1,128)
     past = x_full[:, :, :PAST_LEN]         # (B,1,64)
     future0 = x_full[:, :, PAST_LEN:]      # (B,1,64)
@@ -372,7 +372,6 @@ def split_past_future(x_full: torch.Tensor):
 
 
 # LOSS: noise ONLY future
-
 def diffusion_loss(model, x_full):
     past, future0 = split_past_future(x_full)
 
@@ -573,6 +572,59 @@ def diversity_dtw(fake, pairs=200, seed=43):
     return float(np.mean(d)), float(np.std(d))
 
 
+# =========================
+# Strong probabilistic metrics
+# =========================
+
+def crps_ensemble(y_true, samples):
+    """
+    Continuous Ranked Probability Score for ensemble/sample forecasts.
+
+    y_true: (L,)
+    samples: (K,L)
+    """
+    term1 = np.mean(np.abs(samples - y_true[None, :]), axis=0)
+    pairwise = np.abs(samples[:, None, :] - samples[None, :, :])
+    term2 = 0.5 * np.mean(pairwise, axis=(0, 1))
+    return float(np.mean(term1 - term2))
+
+
+def picp(y_true, samples, alpha=0.1):
+    """
+    Prediction Interval Coverage Probability.
+    alpha=0.1 -> central 90% interval
+    """
+    lower = np.quantile(samples, alpha / 2.0, axis=0)
+    upper = np.quantile(samples, 1.0 - alpha / 2.0, axis=0)
+    inside = (y_true >= lower) & (y_true <= upper)
+    return float(np.mean(inside))
+
+
+def mpiw(samples, alpha=0.1):
+    """
+    Mean Prediction Interval Width.
+    """
+    lower = np.quantile(samples, alpha / 2.0, axis=0)
+    upper = np.quantile(samples, 1.0 - alpha / 2.0, axis=0)
+    return float(np.mean(upper - lower))
+
+
+def wis(y_true, samples, alpha=0.1):
+    """
+    Weighted Interval Score for a central interval.
+    alpha=0.1 -> 90% interval
+    """
+    lower = np.quantile(samples, alpha / 2.0, axis=0)
+    upper = np.quantile(samples, 1.0 - alpha / 2.0, axis=0)
+    width = upper - lower
+
+    below = np.maximum(0.0, lower - y_true)
+    above = np.maximum(0.0, y_true - upper)
+
+    score = width + (2.0 / alpha) * below + (2.0 / alpha) * above
+    return float(np.mean(score))
+
+
 @torch.no_grad()
 # Generates K futures and computes mean/std uncertainty.
 def forecast_with_uncertainty(model, x_full_1, K=200):
@@ -600,14 +652,25 @@ def conditional_future_metrics(true_future, future_samples):
     dtws = [dtw_distance(true_future, future_samples[k]) for k in range(future_samples.shape[0])]
     dtw_mean = float(np.mean(dtws))
     dtw_std = float(np.std(dtws))
+
     psd_dist = psd_l2(true_future[None, :], future_samples, nfft=FUTURE_LEN)
     div_mean, div_std = diversity_dtw(future_samples, pairs=200)
+
+    crps_val = crps_ensemble(true_future, future_samples)
+    wis_90 = wis(true_future, future_samples, alpha=0.1)
+    picp_90 = picp(true_future, future_samples, alpha=0.1)
+    mpiw_90 = mpiw(future_samples, alpha=0.1)
+
     return {
         "dtw_mean": dtw_mean,
         "dtw_std": dtw_std,
         "psd_l2": psd_dist,
         "div_dtw_mean": div_mean,
         "div_dtw_std": div_std,
+        "crps": crps_val,
+        "wis_90": wis_90,
+        "picp_90": picp_90,
+        "mpiw_90": mpiw_90,
     }
 
 
@@ -648,7 +711,8 @@ def average_states(states, weights):
         avg[k] = sum(w * s[k] for s, w in zip(states, weights))
     return avg
 
-#main
+
+# main
 def main():
     client_X_list, client_y_list, label_map = build_federated_clients_from_mitbih(MITBIH_DIR)
     NUM_CLIENTS = len(client_X_list)
@@ -678,14 +742,23 @@ def main():
     hist_dtw = []
     hist_psd = []
     hist_div = []
+    hist_crps = []
+    hist_wis = []
+    hist_picp = []
+    hist_mpiw = []
     hist_loss = []
 
     save_samples_forecasting(global_model, global_testset, tag="round_0000", n=16, K=100)
     m0 = evaluate_forecasting_generator(global_model, global_testset, num_cases=10, K=200)
+
     hist_rounds.append(0)
     hist_dtw.append(m0["dtw_mean"])
     hist_psd.append(m0["psd_l2"])
     hist_div.append(m0["div_dtw_mean"])
+    hist_crps.append(m0["crps"])
+    hist_wis.append(m0["wis_90"])
+    hist_picp.append(m0["picp_90"])
+    hist_mpiw.append(m0["mpiw_90"])
 
     qe = [{k: 0.0 for k in keys} for _ in range(NUM_EDGES)]
     ne = [0 for _ in range(NUM_EDGES)]
@@ -770,10 +843,15 @@ def main():
         if r % SAVE_EVERY == 0:
             save_samples_forecasting(global_model, global_testset, tag=f"round_{r:04d}", n=16, K=100)
             mr = evaluate_forecasting_generator(global_model, global_testset, num_cases=10, K=200)
+
             hist_rounds.append(r)
             hist_dtw.append(mr["dtw_mean"])
             hist_psd.append(mr["psd_l2"])
             hist_div.append(mr["div_dtw_mean"])
+            hist_crps.append(mr["crps"])
+            hist_wis.append(mr["wis_90"])
+            hist_picp.append(mr["picp_90"])
+            hist_mpiw.append(mr["mpiw_90"])
 
     print("\nTraining finished.")
     save_samples_forecasting(global_model, global_testset, tag="final", n=16, K=100)
@@ -805,6 +883,42 @@ def main():
     plt.title("Diversity vs Communication Rounds")
     plt.grid(True)
     plt.savefig(os.path.join(OUT_DIR, "curve_div.png"), dpi=150)
+    plt.close()
+
+    plt.figure()
+    plt.plot(hist_rounds, hist_crps)
+    plt.xlabel("Global Rounds")
+    plt.ylabel("CRPS")
+    plt.title("CRPS vs Communication Rounds")
+    plt.grid(True)
+    plt.savefig(os.path.join(OUT_DIR, "curve_crps.png"), dpi=150)
+    plt.close()
+
+    plt.figure()
+    plt.plot(hist_rounds, hist_wis)
+    plt.xlabel("Global Rounds")
+    plt.ylabel("WIS (90% interval)")
+    plt.title("WIS vs Communication Rounds")
+    plt.grid(True)
+    plt.savefig(os.path.join(OUT_DIR, "curve_wis.png"), dpi=150)
+    plt.close()
+
+    plt.figure()
+    plt.plot(hist_rounds, hist_picp)
+    plt.xlabel("Global Rounds")
+    plt.ylabel("PICP (90% interval)")
+    plt.title("PICP vs Communication Rounds")
+    plt.grid(True)
+    plt.savefig(os.path.join(OUT_DIR, "curve_picp.png"), dpi=150)
+    plt.close()
+
+    plt.figure()
+    plt.plot(hist_rounds, hist_mpiw)
+    plt.xlabel("Global Rounds")
+    plt.ylabel("MPIW (90% interval)")
+    plt.title("MPIW vs Communication Rounds")
+    plt.grid(True)
+    plt.savefig(os.path.join(OUT_DIR, "curve_mpiw.png"), dpi=150)
     plt.close()
 
     if len(hist_loss) > 0:
