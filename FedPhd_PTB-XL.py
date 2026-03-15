@@ -1,10 +1,3 @@
-"""
-PTB-XL (WFDB) + Federated FedPHD + Conditional Diffusion Forecasting with DDIM
-
-Requirements:
-  pip install wfdb pandas numpy torch matplotlib
-"""
-
 import os
 import math
 import random
@@ -21,10 +14,10 @@ from torch.utils.data import Dataset, DataLoader, Subset
 import matplotlib.pyplot as plt
 
 
-# CONFIG
-
 PTBXL_ROOT = r"ptb-xl-a-large-publicly-available-electrocardiography-dataset-1.0.3"
-DATA_DIR = os.path.join(PTBXL_ROOT, "records100")  # 100 Hz
+DATA_DIR = os.path.join(PTBXL_ROOT, "records100")
+OUT_DIR = "ptbxl_fedphd_fixed_forecasting_ddim_64_64"
+os.makedirs(OUT_DIR, exist_ok=True)
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 print("Using device:", device)
@@ -34,14 +27,12 @@ random.seed(SEED)
 np.random.seed(SEED)
 torch.manual_seed(SEED)
 
-# Forecasting window: 64 past + 64 future = 128
 PAST_LEN = 64
 FUTURE_LEN = 64
 WINDOW_LEN = PAST_LEN + FUTURE_LEN
 
 USE_LEAD = 0
 
-# Sliding-window extraction
 MAX_WINDOWS_PER_RECORD = 1024
 MIN_WINDOWS_PER_CLIENT = 50
 STRIDE = 8
@@ -49,29 +40,21 @@ STRIDE = 8
 MAX_CLIENTS = 300
 MAX_SCAN = 4000
 
-# -----------------------------
-# FedPHD settings (FIXED)
-# -----------------------------
 NUM_EDGES = 4
 R = 200
 LOCAL_EPOCHS = 4
 BATCH_SIZE = 64
 
-# Selection hyperparams
-A_SEL = 10.0        
-B_SEL = 0.0          
-TAU_SEL = 1.0         
+A_SEL = 10.0
+B_SEL = 0.0
+TAU_SEL = 1.0
 
-# Aggregation hyperparams (multiplicative)
-ALPHA_AGG = 1.0       
-BETA_AGG = 1.0        
+ALPHA_AGG = 1.0
+BETA_AGG = 1.0
 
-# Global aggregation frequency (keep same behavior)
 RG = 1
-
 SAVE_EVERY = 25
 
-# Diffusion schedule
 T_TRAIN = 500
 BETA_START = 1e-4
 BETA_END = 0.02
@@ -81,19 +64,9 @@ DDIM_ETA = 0.0
 
 LR = 1e-4
 
-OUT_DIR = "ptbxl_fedphd_fixed_forecasting_ddim_64_64"
-os.makedirs(OUT_DIR, exist_ok=True)
 
-
-# PTB-XL LABEL LOADING (diagnostic_class)
-
+# Load PTB-XL diagnostic class labels.
 def load_ptbxl_diagnostic_class_labels(ptbxl_root: str, sampling_rate: int = 100):
-    """
-    Uses scp_statements.csv column: diagnostic_class
-    Returns:
-      recid_to_label: dict[rec_id -> int]
-      label_map: dict[label_name -> int]
-    """
     db_path = os.path.join(ptbxl_root, "ptbxl_database.csv")
     scp_path = os.path.join(ptbxl_root, "scp_statements.csv")
 
@@ -141,7 +114,7 @@ def load_ptbxl_diagnostic_class_labels(ptbxl_root: str, sampling_rate: int = 100
             skipped += 1
             continue
 
-        chosen = sorted(list(classes))[0]  # deterministic single-label
+        chosen = sorted(list(classes))[0]
         recid_to_labelname[rec_id] = chosen
 
     uniq = sorted(set(recid_to_labelname.values()))
@@ -153,8 +126,7 @@ def load_ptbxl_diagnostic_class_labels(ptbxl_root: str, sampling_rate: int = 100
     return recid_to_label, label_map
 
 
-# WFDB RECORD LISTING + WINDOW EXTRACTION
-
+# List WFDB record ids.
 def list_record_ids(root_dir: str) -> List[str]:
     recs = []
     for dirpath, _, filenames in os.walk(root_dir):
@@ -167,6 +139,7 @@ def list_record_ids(root_dir: str) -> List[str]:
     return sorted(set(recs))
 
 
+# Normalize signal to [-1, 1].
 def robust_zscore_to_minus1_1(x: np.ndarray) -> np.ndarray:
     m = float(x.mean())
     s = float(x.std())
@@ -175,6 +148,7 @@ def robust_zscore_to_minus1_1(x: np.ndarray) -> np.ndarray:
     return np.clip(x, -1.0, 1.0).astype(np.float32)
 
 
+# Extract sliding windows from a record.
 def extract_windows_for_record(
     root_dir: str,
     rec_id: str,
@@ -215,6 +189,7 @@ def extract_windows_for_record(
     return X
 
 
+# Build federated clients from WFDB records.
 def build_federated_clients_from_wfdb_records(
     root_dir: str,
     recid_to_label: Dict[str, int],
@@ -269,10 +244,12 @@ def build_federated_clients_from_wfdb_records(
     print("Total labeled records encountered:", labeled_seen)
     print("Total skipped records (read errors):", skip_count)
     if windows_counts:
-        print("Windows stats:",
-              "min=", min(windows_counts),
-              "max=", max(windows_counts),
-              "mean=", sum(windows_counts) / len(windows_counts))
+        print(
+            "Windows stats:",
+            "min=", min(windows_counts),
+            "max=", max(windows_counts),
+            "mean=", sum(windows_counts) / len(windows_counts)
+        )
     print("Total kept clients:", len(client_X_list))
 
     if len(client_X_list) == 0:
@@ -282,11 +259,10 @@ def build_federated_clients_from_wfdb_records(
     return client_X_list, client_y_list, label_map
 
 
-# DATASET + SPLIT (TIME-BASED)
-
+# Dataset for ECG windows.
 class WindowsDataset(Dataset):
     def __init__(self, X: np.ndarray, y: np.ndarray):
-        self.X = torch.from_numpy(X).float()  # (N,1,128)
+        self.X = torch.from_numpy(X).float()
         self.y = torch.from_numpy(y).long()
 
     def __len__(self):
@@ -296,10 +272,8 @@ class WindowsDataset(Dataset):
         return self.X[idx], int(self.y[idx])
 
 
+# Build time-based train/test split.
 def make_global_testset_timebased(client_X_list, client_y_list, test_ratio=0.2):
-    """
-    No shuffle. Uses tail windows as test to reduce leakage from overlap.
-    """
     test_X, test_y = [], []
     client_train_indices = []
 
@@ -321,8 +295,7 @@ def make_global_testset_timebased(client_X_list, client_y_list, test_ratio=0.2):
     return client_train_indices, global_test
 
 
-# FedPHD UTILITIES (same structure, but FIXED scoring usage)
-
+# Similarity score used in FedPHD.
 def sh_score(q: Dict[int, float], target: Dict[int, float]) -> float:
     s = 0.0
     for k in target.keys():
@@ -331,6 +304,7 @@ def sh_score(q: Dict[int, float], target: Dict[int, float]) -> float:
     return 2.0 - math.sqrt(s)
 
 
+# Compute label distribution for a client.
 def compute_label_distribution_from_local_y(local_y: np.ndarray, indices: List[int], num_classes: int):
     cnt = Counter(int(local_y[i]) for i in indices)
     total = len(indices)
@@ -339,6 +313,7 @@ def compute_label_distribution_from_local_y(local_y: np.ndarray, indices: List[i
     return {c: cnt.get(c, 0) / total for c in range(num_classes)}
 
 
+# Update edge distribution after adding a client.
 def update_edge_distribution(qe, ne, qn, nn, keys):
     new_ne = ne + nn
     if new_ne <= 0:
@@ -351,6 +326,7 @@ def update_edge_distribution(qe, ne, qn, nn, keys):
     return new_qe, new_ne
 
 
+# Stable softmax for edge selection.
 def stable_softmax(scores: List[float], tau: float = 1.0) -> List[float]:
     s = np.array(scores, dtype=np.float64)
     s = (s - s.max()) / max(tau, 1e-8)
@@ -359,8 +335,6 @@ def stable_softmax(scores: List[float], tau: float = 1.0) -> List[float]:
     return p.tolist()
 
 
-# DIFFUSION SCHEDULE
-
 betas = torch.linspace(BETA_START, BETA_END, T_TRAIN, device=device)
 alphas = 1.0 - betas
 alphas_cumprod = torch.cumprod(alphas, dim=0)
@@ -368,11 +342,13 @@ sqrt_alphas_cumprod = torch.sqrt(alphas_cumprod)
 sqrt_one_minus_alphas_cumprod = torch.sqrt(1.0 - alphas_cumprod)
 
 
+# Extract schedule values for batch timesteps.
 def extract(a: torch.Tensor, t: torch.Tensor, x_shape):
     out = a.gather(-1, t)
     return out.view(-1, *([1] * (len(x_shape) - 1)))
 
 
+# Forward diffusion sampling.
 def q_sample(x0, t, noise=None):
     if noise is None:
         noise = torch.randn_like(x0)
@@ -382,8 +358,7 @@ def q_sample(x0, t, noise=None):
     return x_t, noise
 
 
-# MODEL (UNet1D) - same as your original
-
+# Sinusoidal time embedding.
 class TimeEmbedding(nn.Module):
     def __init__(self, dim: int):
         super().__init__()
@@ -402,6 +377,7 @@ class TimeEmbedding(nn.Module):
         return emb
 
 
+# Residual block for 1D UNet.
 class ResBlock1D(nn.Module):
     def __init__(self, in_ch: int, out_ch: int, time_dim: int):
         super().__init__()
@@ -426,6 +402,7 @@ class ResBlock1D(nn.Module):
         return h + self.res_conv(x)
 
 
+# Conditional 1D UNet for diffusion.
 class UNet1D(nn.Module):
     def __init__(self, in_ch=2, out_ch=1, base_ch=32, time_dim=128):
         super().__init__()
@@ -475,18 +452,19 @@ class UNet1D(nn.Module):
         return self.out_conv(u2)
 
 
+# Create diffusion model.
 def get_diffusion_model():
     return UNet1D(in_ch=2, out_ch=1, base_ch=32, time_dim=128).to(device)
 
 
+# Split full window into past and future.
 def split_past_future(x_full: torch.Tensor):
     past = x_full[:, :, :PAST_LEN]
     future0 = x_full[:, :, PAST_LEN:]
     return past, future0
 
 
-# LOSS / TRAINING
-
+# Diffusion training loss.
 def diffusion_loss(model, x_full):
     past, future0 = split_past_future(x_full)
 
@@ -496,11 +474,12 @@ def diffusion_loss(model, x_full):
     noise = torch.randn_like(future0)
     future_t, noise = q_sample(future0, t, noise)
 
-    model_in = torch.cat([future_t, past], dim=1)  # (B,2,64)
-    noise_pred = model(model_in, t)                # (B,1,64)
+    model_in = torch.cat([future_t, past], dim=1)
+    noise_pred = model(model_in, t)
     return F.mse_loss(noise_pred, noise)
 
 
+# Train one client locally for one communication round.
 def train_local_one_round(model, opt, loader, epochs=1):
     model.train()
     for _ in range(epochs):
@@ -512,6 +491,7 @@ def train_local_one_round(model, opt, loader, epochs=1):
             opt.step()
 
 
+# Evaluate diffusion loss on the test set.
 @torch.no_grad()
 def evaluate_loss(model, test_dataset, num_batches=10):
     model.eval()
@@ -526,8 +506,7 @@ def evaluate_loss(model, test_dataset, num_batches=10):
     return total / max(count, 1)
 
 
-# DDIM SAMPLING
-
+# DDIM sampler for future forecasting.
 @torch.no_grad()
 def ddim_sample_future(model, past, num_samples=200, ddim_steps=100, eta=0.0):
     model.eval()
@@ -548,7 +527,7 @@ def ddim_sample_future(model, past, num_samples=200, ddim_steps=100, eta=0.0):
 
     for i, t_int in enumerate(ddim_timesteps):
         t = torch.full((B,), t_int, device=device, dtype=torch.long)
-        eps = model(torch.cat([x, past], dim=1), t)  # (B,1,64)
+        eps = model(torch.cat([x, past], dim=1), t)
 
         alpha_bar_t = alphas_cumprod[t_int]
         alpha_bar_prev = (
@@ -575,8 +554,7 @@ def ddim_sample_future(model, past, num_samples=200, ddim_steps=100, eta=0.0):
     return x.clamp(-1, 1)
 
 
-# SAVE SAMPLES
-
+# Save plot grid of generated samples.
 def _save_plot_grid(samples_full: torch.Tensor, png_path: str, ncol: int = 4):
     samples = samples_full.detach().cpu().numpy()
     N = samples.shape[0]
@@ -607,6 +585,7 @@ def _save_plot_grid(samples_full: torch.Tensor, png_path: str, ncol: int = 4):
     plt.close(fig)
 
 
+# Save qualitative forecasting samples.
 @torch.no_grad()
 def save_samples_forecasting(model, global_testset, tag: str, n: int = 16, K: int = 100):
     loader = DataLoader(global_testset, batch_size=n, shuffle=True, num_workers=0)
@@ -634,8 +613,7 @@ def save_samples_forecasting(model, global_testset, tag: str, n: int = 16, K: in
     print("Saved:", png_path)
 
 
-# METRICS
-
+# DTW distance.
 def dtw_distance(a, b):
     L = len(a)
     D = np.full((L + 1, L + 1), np.inf, dtype=np.float64)
@@ -648,6 +626,7 @@ def dtw_distance(a, b):
     return float(np.sqrt(D[L, L] / L))
 
 
+# PSD features using RFFT.
 def psd_features_rfft(x, nfft=256):
     n, L = x.shape
     nfft = max(nfft, L)
@@ -657,6 +636,7 @@ def psd_features_rfft(x, nfft=256):
     return P.astype(np.float32)
 
 
+# PSD-L2 distance.
 def psd_l2(real, fake, nfft=256):
     fr = psd_features_rfft(real, nfft=nfft)
     ff = psd_features_rfft(fake, nfft=nfft)
@@ -665,6 +645,7 @@ def psd_l2(real, fake, nfft=256):
     return float(np.sqrt(np.mean((mr - mf) ** 2)))
 
 
+# Diversity metric using pairwise DTW.
 def diversity_dtw(fake, pairs=200, seed=43):
     rng = np.random.default_rng(seed)
     n = fake.shape[0]
@@ -677,6 +658,43 @@ def diversity_dtw(fake, pairs=200, seed=43):
     return float(np.mean(d)), float(np.std(d))
 
 
+# CRPS for ensemble forecasts.
+def crps_ensemble(y_true, samples):
+    term1 = np.mean(np.abs(samples - y_true[None, :]), axis=0)
+    pairwise = np.abs(samples[:, None, :] - samples[None, :, :])
+    term2 = 0.5 * np.mean(pairwise, axis=(0, 1))
+    return float(np.mean(term1 - term2))
+
+
+# Prediction interval coverage probability.
+def picp(y_true, samples, alpha=0.1):
+    lower = np.quantile(samples, alpha / 2.0, axis=0)
+    upper = np.quantile(samples, 1.0 - alpha / 2.0, axis=0)
+    inside = (y_true >= lower) & (y_true <= upper)
+    return float(np.mean(inside))
+
+
+# Mean prediction interval width.
+def mpiw(samples, alpha=0.1):
+    lower = np.quantile(samples, alpha / 2.0, axis=0)
+    upper = np.quantile(samples, 1.0 - alpha / 2.0, axis=0)
+    return float(np.mean(upper - lower))
+
+
+# Weighted interval score.
+def wis(y_true, samples, alpha=0.1):
+    lower = np.quantile(samples, alpha / 2.0, axis=0)
+    upper = np.quantile(samples, 1.0 - alpha / 2.0, axis=0)
+    width = upper - lower
+
+    below = np.maximum(0.0, lower - y_true)
+    above = np.maximum(0.0, y_true - upper)
+
+    score = width + (2.0 / alpha) * below + (2.0 / alpha) * above
+    return float(np.mean(score))
+
+
+# Forecast one case with uncertainty samples.
 @torch.no_grad()
 def forecast_with_uncertainty(model, x_full_1, K=200):
     x_full_1 = x_full_1.to(device)
@@ -692,21 +710,34 @@ def forecast_with_uncertainty(model, x_full_1, K=200):
     return true_future, mean, std, futures_np
 
 
+# Compute conditional future metrics.
 def conditional_future_metrics(true_future, future_samples):
     dtws = [dtw_distance(true_future, future_samples[k]) for k in range(future_samples.shape[0])]
     dtw_mean = float(np.mean(dtws))
     dtw_std = float(np.std(dtws))
+
     psd_dist = psd_l2(true_future[None, :], future_samples, nfft=FUTURE_LEN)
     div_mean, div_std = diversity_dtw(future_samples, pairs=200)
+
+    crps_val = crps_ensemble(true_future, future_samples)
+    wis_90 = wis(true_future, future_samples, alpha=0.1)
+    picp_90 = picp(true_future, future_samples, alpha=0.1)
+    mpiw_90 = mpiw(future_samples, alpha=0.1)
+
     return {
         "dtw_mean": dtw_mean,
         "dtw_std": dtw_std,
         "psd_l2": psd_dist,
         "div_dtw_mean": div_mean,
         "div_dtw_std": div_std,
+        "crps": crps_val,
+        "wis_90": wis_90,
+        "picp_90": picp_90,
+        "mpiw_90": mpiw_90,
     }
 
 
+# Evaluate forecasting generator on multiple cases.
 @torch.no_grad()
 def evaluate_forecasting_generator(model, global_testset, num_cases=10, K=200):
     loader = DataLoader(global_testset, batch_size=1, shuffle=True, num_workers=0)
@@ -727,16 +758,17 @@ def evaluate_forecasting_generator(model, global_testset, num_cases=10, K=200):
     return out
 
 
-# STATE HELPERS
-
+# Get model state dict on CPU.
 def get_model_state(model):
     return {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
 
 
+# Load model state dict.
 def set_model_state(model, state_dict):
     model.load_state_dict(state_dict)
 
 
+# Average multiple state dicts.
 def average_states(states, weights):
     avg = {}
     for k in states[0].keys():
@@ -744,13 +776,10 @@ def average_states(states, weights):
     return avg
 
 
-# MAIN (FedPHD FIXED)
-
+# Main training loop.
 def main():
-    # Load labels
     recid_to_label, label_map = load_ptbxl_diagnostic_class_labels(PTBXL_ROOT, sampling_rate=100)
 
-    # Build clients
     client_X_list, client_y_list, label_map = build_federated_clients_from_wfdb_records(
         DATA_DIR, recid_to_label, label_map
     )
@@ -758,11 +787,9 @@ def main():
     num_classes = len(label_map)
     print(f"Clients: {NUM_CLIENTS}, classes: {num_classes}")
 
-    # Datasets + time-based split
     client_datasets = [WindowsDataset(X, y) for X, y in zip(client_X_list, client_y_list)]
     client_train_indices, global_testset = make_global_testset_timebased(client_X_list, client_y_list, test_ratio=0.2)
 
-    # label distribution stuff
     keys = list(range(num_classes))
     target = {c: 1.0 / num_classes for c in range(num_classes)}
 
@@ -778,26 +805,40 @@ def main():
     global_model = get_diffusion_model()
     global_state = get_model_state(global_model)
 
-    # initial save + metrics
-    save_samples_forecasting(global_model, global_testset, tag="round_0000", n=16, K=100)
-    _ = evaluate_forecasting_generator(global_model, global_testset, num_cases=10, K=200)
+    hist_rounds = []
+    hist_dtw = []
+    hist_psd = []
+    hist_div = []
+    hist_crps = []
+    hist_wis = []
+    hist_picp = []
+    hist_mpiw = []
+    hist_loss = []
 
-    # FedPHD edge stats
+    save_samples_forecasting(global_model, global_testset, tag="round_0000", n=16, K=100)
+    m0 = evaluate_forecasting_generator(global_model, global_testset, num_cases=10, K=200)
+
+    hist_rounds.append(0)
+    hist_dtw.append(m0["dtw_mean"])
+    hist_psd.append(m0["psd_l2"])
+    hist_div.append(m0["div_dtw_mean"])
+    hist_crps.append(m0["crps"])
+    hist_wis.append(m0["wis_90"])
+    hist_picp.append(m0["picp_90"])
+    hist_mpiw.append(m0["mpiw_90"])
+
     qe = [{k: 0.0 for k in keys} for _ in range(NUM_EDGES)]
     ne = [0 for _ in range(NUM_EDGES)]
 
-    # client models + opts
     client_models = [get_diffusion_model() for _ in range(NUM_CLIENTS)]
     client_opts = [torch.optim.AdamW(client_models[i].parameters(), lr=LR) for i in range(NUM_CLIENTS)]
 
     for r in range(1, R + 1):
         print(f"\n=== Global Round {r}/{R} (FedPHD FIXED) ===")
 
-        # broadcast global -> clients
         for m in client_models:
             set_model_state(m, global_state)
 
-        # -------- FIXED client -> edge assignment ----------
         client_to_edge = []
         for cid in range(NUM_CLIENTS):
             scores = []
@@ -809,14 +850,10 @@ def main():
                 )
                 mu_prime = sh_score(q_prime, target)
 
-                # FIX 1: normalize n_prime so it doesn't dominate
                 n_norm = float(n_prime) / max(avg_n, 1.0)
-
-                # score on comparable scales
                 score = A_SEL * mu_prime - n_norm + B_SEL
                 scores.append(score)
 
-            # FIX 2: stable softmax (no all-zero collapse)
             probs = stable_softmax(scores, tau=TAU_SEL)
 
             rnd = random.random()
@@ -834,9 +871,7 @@ def main():
                 client_dists[cid], client_sizes[cid],
                 keys
             )
-        # ---------------------------------------------------
 
-        # local training
         client_states = []
         for cid in range(NUM_CLIENTS):
             idxs = client_train_indices[cid]
@@ -854,7 +889,6 @@ def main():
             train_local_one_round(client_models[cid], client_opts[cid], loader, epochs=LOCAL_EPOCHS)
             client_states.append(get_model_state(client_models[cid]))
 
-        # edge aggregation (FIX 3: multiplicative weights)
         edge_states = []
         for e in range(NUM_EDGES):
             members = [cid for cid in range(NUM_CLIENTS) if client_to_edge[cid] == e]
@@ -874,7 +908,6 @@ def main():
             member_states = [client_states[cid] for cid in members]
             edge_states.append(average_states(member_states, weights))
 
-        # global aggregation (FIX 3 also)
         if (r % RG) == 0:
             edge_mu = [sh_score(qe[e], target) for e in range(NUM_EDGES)]
             raw_w = []
@@ -890,22 +923,108 @@ def main():
             global_state = average_states(edge_states, edge_weights)
             set_model_state(global_model, global_state)
 
-            # reset edge stats each global aggregation (same as your original)
             qe = [{k: 0.0 for k in keys} for _ in range(NUM_EDGES)]
             ne = [0 for _ in range(NUM_EDGES)]
 
         if r % 10 == 0:
             loss = evaluate_loss(global_model, global_testset, num_batches=10)
             print(f"[Eval] diffusion loss: {loss:.4f}")
+            hist_loss.append((r, loss))
 
         if r % SAVE_EVERY == 0:
             save_samples_forecasting(global_model, global_testset, tag=f"round_{r:04d}", n=16, K=100)
-            _ = evaluate_forecasting_generator(global_model, global_testset, num_cases=10, K=200)
+            mr = evaluate_forecasting_generator(global_model, global_testset, num_cases=10, K=200)
+
+            hist_rounds.append(r)
+            hist_dtw.append(mr["dtw_mean"])
+            hist_psd.append(mr["psd_l2"])
+            hist_div.append(mr["div_dtw_mean"])
+            hist_crps.append(mr["crps"])
+            hist_wis.append(mr["wis_90"])
+            hist_picp.append(mr["picp_90"])
+            hist_mpiw.append(mr["mpiw_90"])
 
     print("\nTraining finished.")
     save_samples_forecasting(global_model, global_testset, tag="final", n=16, K=100)
     final_metrics = evaluate_forecasting_generator(global_model, global_testset, num_cases=20, K=200)
     print("\nFINAL METRICS DICT:", final_metrics)
+
+    plt.figure()
+    plt.plot(hist_rounds, hist_dtw)
+    plt.xlabel("Global Rounds")
+    plt.ylabel("DTW (mean)")
+    plt.title("DTW vs Communication Rounds")
+    plt.grid(True)
+    plt.savefig(os.path.join(OUT_DIR, "curve_dtw.png"), dpi=150)
+    plt.close()
+
+    plt.figure()
+    plt.plot(hist_rounds, hist_psd)
+    plt.xlabel("Global Rounds")
+    plt.ylabel("PSD-L2")
+    plt.title("PSD-L2 vs Communication Rounds")
+    plt.grid(True)
+    plt.savefig(os.path.join(OUT_DIR, "curve_psd.png"), dpi=150)
+    plt.close()
+
+    plt.figure()
+    plt.plot(hist_rounds, hist_div)
+    plt.xlabel("Global Rounds")
+    plt.ylabel("Diversity (Div-DTW mean)")
+    plt.title("Diversity vs Communication Rounds")
+    plt.grid(True)
+    plt.savefig(os.path.join(OUT_DIR, "curve_div.png"), dpi=150)
+    plt.close()
+
+    plt.figure()
+    plt.plot(hist_rounds, hist_crps)
+    plt.xlabel("Global Rounds")
+    plt.ylabel("CRPS")
+    plt.title("CRPS vs Communication Rounds")
+    plt.grid(True)
+    plt.savefig(os.path.join(OUT_DIR, "curve_crps.png"), dpi=150)
+    plt.close()
+
+    plt.figure()
+    plt.plot(hist_rounds, hist_wis)
+    plt.xlabel("Global Rounds")
+    plt.ylabel("WIS (90% interval)")
+    plt.title("WIS vs Communication Rounds")
+    plt.grid(True)
+    plt.savefig(os.path.join(OUT_DIR, "curve_wis.png"), dpi=150)
+    plt.close()
+
+    plt.figure()
+    plt.plot(hist_rounds, hist_picp)
+    plt.xlabel("Global Rounds")
+    plt.ylabel("PICP (90% interval)")
+    plt.title("PICP vs Communication Rounds")
+    plt.grid(True)
+    plt.savefig(os.path.join(OUT_DIR, "curve_picp.png"), dpi=150)
+    plt.close()
+
+    plt.figure()
+    plt.plot(hist_rounds, hist_mpiw)
+    plt.xlabel("Global Rounds")
+    plt.ylabel("MPIW (90% interval)")
+    plt.title("MPIW vs Communication Rounds")
+    plt.grid(True)
+    plt.savefig(os.path.join(OUT_DIR, "curve_mpiw.png"), dpi=150)
+    plt.close()
+
+    if len(hist_loss) > 0:
+        lrnds = [x[0] for x in hist_loss]
+        lvals = [x[1] for x in hist_loss]
+        plt.figure()
+        plt.plot(lrnds, lvals)
+        plt.xlabel("Global Rounds")
+        plt.ylabel("Diffusion Loss")
+        plt.title("Diffusion Loss vs Communication Rounds")
+        plt.grid(True)
+        plt.savefig(os.path.join(OUT_DIR, "curve_loss.png"), dpi=150)
+        plt.close()
+
+    print("Saved plots in:", OUT_DIR)
 
 
 if __name__ == "__main__":
