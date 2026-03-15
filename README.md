@@ -95,8 +95,11 @@ Forecasting quality is evaluated on the future segment only using:
 - **DTW (Dynamic Time Warping)** — temporal alignment similarity
 - **PSD-L2 Distance** — spectral distribution similarity
 - **Diversity (Pairwise DTW)** — generative variability
+- **CRPS (Continuous Ranked Probability Score)** — probabilistic forecast accuracy
+- **WIS90 (Weighted Interval Score)** — prediction interval quality
+- **PICP90 (Prediction Interval Coverage Probability)** — uncertainty calibration
+- **MPIW90 (Mean Prediction Interval Width)** — prediction interval sharpness
 - **Diffusion Loss** — training stability indicator
-
 Metrics are averaged across multiple conditional cases.
 
 ### Experimental Configuration
