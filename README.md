@@ -1,111 +1,122 @@
-# federated-conditional-diffusion-time-series
-Hierarchical federated conditional diffusion model for ECG time-series forecasting with uncertainty quantification (MIT-BIH dataset).
+# FedTS-HDiff: Federated Time-Series Hierarchical Diffusion
 
-## Federated Conditional Diffusion Models for ECG Time-Series Forecasting
+Hierarchical federated conditional diffusion model for ECG time-series forecasting with uncertainty quantification using the MIT-BIH Arrhythmia Database.
 
-### Overview
+---
 
-This project studies conditional generative modeling for time-series forecasting under decentralized data constraints, using ECG signals from the MIT-BIH Arrhythmia Database as a heterogeneous real-world benchmark.
+## 📌 Overview
 
-We develop a hierarchical federated learning framework for training a conditional diffusion model that learns the distribution:
+This project introduces **FedTS-HDiff (Federated Time-Series Hierarchical Diffusion)**, a hierarchical federated learning framework for conditional generative time-series forecasting under decentralized data constraints.
 
-$$p(x_{future} \mid x_{past})$$
+Using ECG signals from the MIT-BIH Arrhythmia Database as a heterogeneous real-world benchmark, the model learns the conditional distribution:
 
-Unlike deterministic regression models, this approach captures multi-modal future trajectories and provides uncertainty quantification through generative sampling.
+p(x_future | x_past)
 
-### Research Motivation
+Unlike deterministic forecasting approaches, **FedTS-HDiff** captures **multi-modal future trajectories** and provides **uncertainty quantification** via generative sampling.
 
-Modern forecasting problems increasingly involve:
+---
 
-- Non-IID distributed datasets
-- Privacy constraints preventing centralization
-- Need for calibrated uncertainty
-- Multi-modal future behavior
+## 🚀 Motivation
 
-This project integrates:
+Modern forecasting systems increasingly face:
 
-- Denoising Diffusion Probabilistic Models (DDPM)
-- DDIM-based fast sampling
-- Hierarchical Federated Aggregation
-- Distribution-aware client selection
+- Non-IID distributed datasets  
+- Privacy constraints preventing centralization  
+- Need for calibrated uncertainty  
+- Multi-modal future behavior  
 
-The framework is general and extendable to biomedical, financial, and macroeconomic forecasting systems.
+**FedTS-HDiff** integrates:
 
-### Problem Formulation
+- Denoising Diffusion Probabilistic Models (DDPM)  
+- DDIM-based fast sampling  
+- Hierarchical Federated Aggregation  
+- Distribution-aware client selection  
+
+Applications include:
+
+- Biomedical signals  
+- Financial time-series  
+- Macroeconomic forecasting  
+
+---
+
+## 🧠 Problem Formulation
 
 Each ECG record is treated as a federated client.
 
 For every detected heartbeat:
 
-1. Extract 128-sample window centered at R-peak
+1. Extract a 128-sample window centered at the R-peak  
 2. Split into:
-   - Past: 64 samples
-   - Future: 64 samples
+   - Past: 64 samples  
+   - Future: 64 samples  
 
 The model learns:
 
-$$\epsilon_\theta(x_t, t, x_{past})$$
+εθ(x_t, t, x_past)
 
 Training objective:
 
-$$L = \mathbb{E}_{t,\epsilon} \|\epsilon - \epsilon_\theta(x_t, t, x_{past})\|_2$$
+L = E ||ε - εθ(x_t, t, x_past)||²
 
-Only the future segment is diffused and predicted, making this a conditional generative forecasting framework.
+Only the **future segment** is diffused and predicted.
 
-### Methodology
+---
 
-#### 1. Conditional Diffusion Architecture
+## ⚙️ Methodology
 
-- 1D U-Net backbone
-- Sinusoidal time embeddings
-- Residual blocks with GroupNorm
-- Linear beta schedule (T = 500)
-- Noise prediction objective
+### 1. Conditional Diffusion Model
+
+- 1D U-Net backbone  
+- Sinusoidal time embeddings  
+- Residual blocks + GroupNorm  
+- Linear beta schedule (T = 500)  
+- Noise prediction objective  
 
 **Inference:**
 
-- DDIM sampling
-- Monte Carlo generation (K samples)
-- Mean trajectory = forecast
-- Variance = uncertainty estimate
+- DDIM sampling  
+- Monte Carlo sampling (K trajectories)  
+- Mean → forecast  
+- Variance → uncertainty  
 
-#### 2. Hierarchical Federated Learning
+---
 
-**Structure:**
+### 2. Hierarchical Federated Learning
 
-Clients → Edge Aggregators → Global Server
+**Architecture:**
 
-**Properties:**
+Clients → Edge Aggregators → Global Server  
 
-- Each ECG record = one client
-- Non-IID label distributions
-- Sh-score–based heterogeneity metric
-- Distribution-aware client selection
-- Weighted aggregation based on:
-  - Client size
-  - Distribution alignment
-  - Edge-level diversity
+**Key Features:**
 
-This design reduces aggregation bias and improves robustness under heterogeneous data distributions.
+- Each ECG record = one client  
+- Non-IID distributions  
+- Distribution-aware client selection  
+- Weighted aggregation using:
+  - Client size  
+  - Distribution similarity  
+  - Edge diversity  
 
-### Evaluation Metrics
+---
 
-Forecasting quality is evaluated on the future segment only using:
+## 📊 Evaluation Metrics
 
-- **DTW (Dynamic Time Warping)** — temporal alignment similarity
-- **PSD-L2 Distance** — spectral distribution similarity
-- **Diversity (Pairwise DTW)** — generative variability
-- **CRPS (Continuous Ranked Probability Score)** — probabilistic forecast accuracy
-- **WIS90 (Weighted Interval Score)** — prediction interval quality
-- **PICP90 (Prediction Interval Coverage Probability)** — uncertainty calibration
-- **MPIW90 (Mean Prediction Interval Width)** — prediction interval sharpness
-- **Diffusion Loss** — training stability indicator
-Metrics are averaged across multiple conditional cases.
+- DTW (Dynamic Time Warping)  
+- PSD-L2 Distance  
+- Diversity (Pairwise DTW)  
+- CRPS (Continuous Ranked Probability Score)  
+- WIS90  
+- PICP90  
+- MPIW90  
+- Diffusion Loss  
 
-### Experimental Configuration
+---
+
+## 🔬 Experimental Setup
 
 | Parameter | Value |
-|-----------|-------|
+|----------|------|
 | Past Length | 64 |
 | Future Length | 64 |
 | Diffusion Steps | 500 |
@@ -115,86 +126,11 @@ Metrics are averaged across multiple conditional cases.
 | Batch Size | 64 |
 | Learning Rate | 1e-4 |
 
-### Installation
+---
 
-Create environment:
-
-```bash
-conda create -n fed_diffusion python=3.10
-conda activate fed_diffusion
-```
-
-Install dependencies:
+## 🛠️ Installation
 
 ```bash
+conda create -n fedts_hdiff python=3.10
+conda activate fedts_hdiff
 pip install torch numpy matplotlib wfdb
-```
-
-### Dataset Setup
-
-Download the MIT-BIH Arrhythmia Database from PhysioNet.
-
-Place the dataset in:
-
-```
-mit-bih-arrhythmia-database-1.0.0/
-```
-
-Ensure the directory contains `.hea`, `.dat`, and `.atr` files.
-
-The script expects:
-
-```python
-MITBIH_DIR = "mit-bih-arrhythmia-database-1.0.0"
-```
-
-### Running the Experiment
-
-```bash
-python main_fedphd.py
-```
-
-Training will:
-
-- Perform hierarchical federated rounds
-- Periodically save forecast samples
-- Compute conditional generative metrics
-- Save performance curves
-
-### Output Artifacts
-
-Inside:
-
-```
-final_mitbih_fed_forecasting_ddim_64_64/
-```
-
-You will find:
-
-- Sample forecast grids (`.png`)
-- Raw forecast tensors (`.pt`)
-- DTW curve
-- PSD-L2 curve
-- Diversity curve
-- Diffusion loss curve
-
-### Research Contributions
-
-- Conditional diffusion for ECG forecasting
-- Future-only diffusion formulation
-- Hierarchical federated aggregation
-- Distribution-aware client selection
-- Monte Carlo uncertainty estimation
-- Diversity-aware generative evaluation
-
-### Potential Extensions
-
-- Transformer-based backbone
-- Personalization layers per client
-- Adaptive edge clustering
-- Multi-lead ECG forecasting
-- Application to financial or macroeconomic time-series
-
-### License
-
-MIT License
