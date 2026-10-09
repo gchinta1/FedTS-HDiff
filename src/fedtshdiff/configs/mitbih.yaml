@@ -1,0 +1,28 @@
+# MIT-BIH: paper Section 5.2-5.3 / original FedTS-HDiff_Mit.py
+dataset: mitbih
+past_len: 64
+future_len: 64
+split: random            # original: per-client random split with seed 123
+split_seed: 123
+test_ratio: 0.2
+val_ratio: 0.1           # revision: 10% of each client's training part for hyperparameter selection
+diffusion_steps: 500
+ddim_steps: 200
+rounds: 200
+local_epochs: 4
+batch_size: 64
+lr: 1.0e-4
+num_edges: 2
+descriptor: label
+grouping: balance
+# The MIT-BIH script used linear selection/aggregation forms (a_agg=20), under which every
+# score is clipped to 0 and assignment is uniform; the revision uses the paper's equations
+# (softmax selection, exponential weights) on every dataset.  `legacy_mitbih` in the
+# reproduction suite restores the original forms.
+select_form: softmax
+a_sel: 10.0
+b_sel: 0.0
+tau_sel: 1.0
+agg_form: exp
+alpha_agg: 1.0
+beta_agg: 1.0

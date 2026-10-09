@@ -1,0 +1,20 @@
+# Tiny synthetic data for tests and CPU smoke runs (prepare with `fedts prepare-data --dataset synthetic`).
+dataset: synthetic
+past_len: 16
+future_len: 16
+split: random
+val_ratio: 0.1
+diffusion_steps: 50
+ddim_steps: 10
+rounds: 3
+local_epochs: 2
+batch_size: 16
+num_edges: 2
+descriptor: label
+eval_every: 1
+eval_curve_windows: 16
+eval_curve_samples: 8
+eval_final_windows: 32
+eval_final_samples: 8
+diag_windows: 16
+diag_random_partitions: 3

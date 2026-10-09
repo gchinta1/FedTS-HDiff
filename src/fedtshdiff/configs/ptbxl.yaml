@@ -1,0 +1,24 @@
+# PTB-XL: paper Section 5.2-5.3 / original FedTS-HDiff_PTB-XL.py
+dataset: ptbxl
+past_len: 64
+future_len: 64
+max_clients: 300
+split: time
+test_ratio: 0.2
+val_ratio: 0.1
+diffusion_steps: 500
+ddim_steps: 200
+rounds: 200
+local_epochs: 4
+batch_size: 64
+lr: 1.0e-4
+num_edges: 4
+descriptor: label
+grouping: balance
+select_form: softmax
+a_sel: 10.0
+b_sel: 0.0
+tau_sel: 1.0
+agg_form: exp
+alpha_agg: 1.0
+beta_agg: 1.0

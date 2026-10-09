@@ -1,0 +1,26 @@
+# Electricity: paper Section 5.3 ("100-1000 windows per client, up to 60 clients, 96/96, stride 16").
+# NB: Section 5.2 of the submitted paper states different bounds (<=300 windows, <=150 clients);
+# the revision follows Section 5.3 and the text must be made consistent.
+dataset: electricity
+past_len: 96
+future_len: 96
+max_clients: 60
+split: time
+test_ratio: 0.2
+val_ratio: 0.1
+diffusion_steps: 200
+ddim_steps: 200
+rounds: 250
+local_epochs: 4
+batch_size: 32
+lr: 1.0e-4
+num_edges: 2
+descriptor: signal
+grouping: balance
+select_form: softmax
+a_sel: 10.0
+b_sel: 0.0
+tau_sel: 1.0
+agg_form: exp
+alpha_agg: 1.0
+beta_agg: 1.0
