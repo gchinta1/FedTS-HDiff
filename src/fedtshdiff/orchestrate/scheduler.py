@@ -94,6 +94,10 @@ def worker_env(slot: Slot, base: Mapping[str, str] | None = None) -> dict[str, s
         env[k] = "1"
     env["PYTHONUNBUFFERED"] = "1"
     env["FEDTS_SLOT"] = slot.slot_id
+    if slot.device:
+        env["FEDTS_REQUIRE_CUDA"] = "1"  # the worker must fail rather than fall back to CPU
+    else:
+        env.pop("FEDTS_REQUIRE_CUDA", None)
     # workers import exactly the package the driver runs (also when it is not pip-installed)
     pkg_parent = str(Path(__file__).resolve().parents[2])
     env["PYTHONPATH"] = os.pathsep.join([pkg_parent] + [p for p in env.get("PYTHONPATH", "").split(os.pathsep) if p])
@@ -353,7 +357,8 @@ class Scheduler:
                         continue
                     self.launch(task, slots)
             pending = [t for t in plan.tasks if t.state != "done" and t.task_id not in self.failed]
-            if not self.running and (not pending or blocked or not plan.by_state("ready")):
+            launchable = [t for t in plan.by_state("ready") if t.task_id not in self.failed]
+            if not self.running and (not pending or blocked or not launchable):
                 state = "complete" if not pending and not self.failed else (
                     "failed" if self.failed else "blocked")
                 if state == "blocked":

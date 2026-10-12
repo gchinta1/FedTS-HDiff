@@ -59,6 +59,8 @@ MAIN_METHODS: dict[str, dict[str, Any]] = {
     "csdi": CSDI,
 }
 DIAG = {"diag_rounds": "@diag"}  # filled per dataset: [1, 25, R/2, R+1]
+# Groups whose convergence curves no table/figure reads evaluate only at round 0 and R.
+NO_CURVES = {"eval_every": "@rounds"}
 DDIM_EXTRA = [25, 50, 100]
 
 ABLATIONS: dict[str, dict[str, Any]] = {
@@ -109,14 +111,15 @@ def _rounds(dataset: str) -> int:
 
 
 def _resolve_macros(ds: str, ov: dict[str, Any]) -> dict[str, Any]:
-    R = int(ov.get("rounds", _rounds(ds))) if not isinstance(ov.get("rounds"), str) else _rounds(ds)
-    out = {}
-    for k, v in ov.items():
+    out = dict(ov)
+    if out.get("rounds") == "@half_rounds":
+        out["rounds"] = max(1, _rounds(ds) // 2)
+    R = int(out.get("rounds", _rounds(ds)))  # the run's own round count, after halving
+    for k, v in out.items():
         if v == "@diag":
-            v = sorted({1, min(25, R), max(1, R // 2), R + 1})
-        elif v == "@half_rounds":
-            v = max(1, R // 2)
-        out[k] = v
+            out[k] = sorted({1, min(25, R), max(1, R // 2), R + 1})
+        elif v == "@rounds":
+            out[k] = R
     return out
 
 
@@ -141,7 +144,7 @@ def tune_specs(datasets: Iterable[str] = DATASETS) -> list[TaskSpec]:
     for ds in datasets:
         for method, (key, grid) in TUNING_GRID.items():
             for v in grid:
-                ov = {"method": method, key: v, "eval_split": "val", "eval_extra_ddim": []}
+                ov = {"method": method, key: v, "eval_split": "val", "eval_extra_ddim": [], **NO_CURVES}
                 out.append(TaskSpec("tune", f"tune_{method}_{key}{v}", ds, TUNE_SEED, ov))
     return out
 
@@ -165,11 +168,12 @@ def campaign(groups: Iterable[str] = GROUPS, tuned: bool = True, seeds: Iterable
         if "ablation" in groups:
             for label, ov in ABLATIONS.items():
                 for s in seeds:
-                    specs.append(_with_selection(TaskSpec("ablation", label, ds, s, dict(ov)), tuned))
+                    specs.append(_with_selection(TaskSpec("ablation", label, ds, s, {**ov, **NO_CURVES}), tuned))
             if ds in DESCRIPTOR_DATASETS:  # labeled data: balance towards the population label mix
                 for s in seeds:
                     specs.append(_with_selection(TaskSpec("ablation", "popmean_ref", ds, s,
-                                                          {"method": "fedts_hdiff", "homogeneity_ref": "mean"}), tuned))
+                                                          {"method": "fedts_hdiff", "homogeneity_ref": "mean",
+                                                           **NO_CURVES}), tuned))
             for s in seeds:  # the full model (deduplicated with main)
                 specs.append(_with_selection(TaskSpec("ablation", "fedts_hdiff", ds, s,
                                                       {"method": "fedts_hdiff", **DIAG,
@@ -178,7 +182,8 @@ def campaign(groups: Iterable[str] = GROUPS, tuned: bool = True, seeds: Iterable
             for desc in ("signal", "psd"):
                 for s in seeds:
                     specs.append(_with_selection(TaskSpec("descriptors", f"fedts_hdiff_{desc}", ds, s,
-                                                          {"method": "fedts_hdiff", "descriptor": desc}), tuned))
+                                                          {"method": "fedts_hdiff", "descriptor": desc,
+                                                           **NO_CURVES}), tuned))
         if "drift" in groups and ds in DRIFT_DATASETS:
             R = _rounds(ds)
             drift = {"drift_rounds": [int(R * 0.4), int(R * 0.7)], "drift_fraction": 0.3}
@@ -196,14 +201,15 @@ def campaign(groups: Iterable[str] = GROUPS, tuned: bool = True, seeds: Iterable
         if "cost" in groups:
             for label, ov in MAIN_METHODS.items():
                 # one client at a time, so per-client compute times are those of a single device
-                cost = {**ov, "rounds": 10, "eval_every": 10, "eval_extra_ddim": DDIM_EXTRA,
+                cost = {**ov, "rounds": 10, "eval_every": 10,
+                        "eval_extra_ddim": DDIM_EXTRA if label == "fedts_hdiff" else [],  # read by tab_ddim
                         "save_checkpoint": False, "client_batch": 1}
                 specs.append(_with_selection(TaskSpec("cost", f"cost_{label}", ds, 1, cost, exclusive=True), False))
             specs.append(TaskSpec("cost", "cost_fedts_hdiff_k2", ds, 1,
                                   {"method": "fedts_hdiff", "edge_rounds": 2, "rounds": 10, "eval_every": 10,
                                    "save_checkpoint": False, "beta_agg": 1.0, "client_batch": 1}, exclusive=True))
         if "reproduce" in groups:
-            legacy = {"ddim_spacing": "legacy", "val_ratio": 0.0}
+            legacy = {"ddim_spacing": "legacy", "val_ratio": 0.0, "split_gap": 0}
             if ds == "mitbih":
                 legacy.update(select_form="linear", agg_form="linear", alpha_agg=20.0, beta_agg=0.0)
             if ds == "metrla":
@@ -211,7 +217,7 @@ def campaign(groups: Iterable[str] = GROUPS, tuned: bool = True, seeds: Iterable
             for label, ov in {"repro_fedavg": {"method": "fedavg"},
                               "repro_fedts_hdiff": {"method": "fedts_hdiff"}}.items():
                 for s in seeds[:3]:
-                    spec = TaskSpec("reproduce", label, ds, s, {**ov, **legacy})
+                    spec = TaskSpec("reproduce", label, ds, s, {**ov, **legacy, **NO_CURVES})
                     if "beta_agg" not in spec.overrides and spec.overrides["method"] == "fedts_hdiff":
                         spec.overrides["beta_agg"] = 1.0
                     specs.append(spec)
@@ -222,19 +228,23 @@ def campaign(groups: Iterable[str] = GROUPS, tuned: bool = True, seeds: Iterable
         for N in Ns:
             for s in scale_seeds:
                 specs.append(_with_selection(TaskSpec("scalability", f"scale_fedavg_N{N}", sds, s,
-                                                      {"method": "fedavg", "max_clients": N}), tuned))
+                                                      {"method": "fedavg", "max_clients": N, **NO_CURVES}), tuned))
                 for K in Ks:
                     specs.append(_with_selection(TaskSpec("scalability", f"scale_hdiff_N{N}_K{K}", sds, s,
                                                           {"method": "fedts_hdiff", "max_clients": N,
-                                                           "num_edges": K}), tuned))
+                                                           "num_edges": K, **NO_CURVES}), tuned))
                 specs.append(_with_selection(TaskSpec("scalability", f"scale_hdiff_N{N}_K{Ks[1]}_kappa2", sds, s,
                                                       {"method": "fedts_hdiff", "max_clients": N, "num_edges": Ks[1],
-                                                       "edge_rounds": 2, "rounds": "@half_rounds"}), tuned))
+                                                       "edge_rounds": 2, "rounds": "@half_rounds", **NO_CURVES}), tuned))
         for q in SCALE_Q:
             for s in scale_seeds:
                 for label, ov in {"fedavg": {"method": "fedavg"}, "hdiff": {"method": "fedts_hdiff"}}.items():
                     specs.append(_with_selection(TaskSpec("scalability", f"scale_{label}_N{n_part}_q{q}", sds, s,
-                                                          {**ov, "max_clients": n_part, "participation": q}), tuned))
+                                                          {**ov, "max_clients": n_part, "participation": q, **NO_CURVES}), tuned))
+    if tuned:  # tasks that need a validation-selected value always bring their tuning runs along
+        needed = {sel.split("__", 1)[0] for sp in specs for sel in sp.select.values()}
+        have = {sp.dataset for sp in specs if sp.group == "tune"}
+        specs += tune_specs(sorted(needed - have))
     for sp in specs:
         sp.overrides = _resolve_macros(sp.dataset, sp.overrides)
     return _dedupe(specs)

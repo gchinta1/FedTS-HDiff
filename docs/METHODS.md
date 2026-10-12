@@ -10,12 +10,12 @@
 | Local optimiser | AdamW, lr 1e-4, weight decay 0.01, β = (0.9, 0.999), ε = 1e-8; one persistent optimiser state per client across rounds (as in the submission) |
 | Local work | E = 4 epochs per round; batch 64 (ECG) / 32 (others); every epoch is a seeded permutation of the client's training windows |
 | Rounds | R = 200 (ECG) / 250 (others); full participation unless stated |
-| Splits | Per client: test = last 20% (time split) or a seeded random 20% (MIT-BIH); validation = last 10% of the remaining training part |
+| Splits | Per client: test = last 20% (time split) or a seeded random 20% (MIT-BIH); validation = last 10% of the remaining training part. Under the time split, ⌈F/stride⌉ − 1 windows before the validation block are dropped (7 PTB-XL, 5 Electricity, 1 METR-LA), so no training window contains a held-out forecast target (overlapping sliding windows) |
 | Seeds | Reporting seeds 1–5; tuning seed 101; evaluation seed 2024 (fixed across methods and seeds) |
-| Randomness control | Every client's local stream is keyed by (seed, round, client, edge round). All methods therefore see the same minibatch orders and diffusion noise for a given client and round, and the result does not depend on training order. Model initialisation depends only on the seed. |
+| Randomness control | Every client's local stream is keyed by (seed, round, client, edge round). All methods therefore see the same minibatch orders and diffusion noise for a given client and round, and the result does not depend on training order (FedTDD draws its synthetic minibatches from the same stream, so its later draws differ). Participants under partial participation are drawn from a separate stream keyed by (seed, round), so every method trains the same clients in every round. Model initialisation depends only on the seed. |
 | Numerics | Full FP32 (TF32 and cuDNN autotuning disabled) |
 | Execution | Clients of the U-Net methods are trained in client-batched passes (identical random draws to one-at-a-time training; agreement to floating-point precision) |
-| Evaluation | Fixed client-stratified set of 1,024 test windows (all test windows if fewer), 100 samples per window, sampling noise fixed by the evaluation seed. Convergence curves: first 256 windows of the same set, 50 samples, every 10 rounds. |
+| Evaluation | Fixed client-stratified set of 1,024 test windows (all test windows if fewer), 100 samples per window. The DDIM starting noise of every (window, sample) is drawn once from the evaluation seed, so every method, including the per-client (FedRep) and per-cluster (CFL) evaluations, sees identical sampling noise for each window. Convergence curves: first 256 windows of the same set, 50 samples, every 10 rounds. Forecasts are clamped to the data range [−1, 1] for every model. |
 
 ## 2. Methods
 
@@ -27,7 +27,7 @@
 * **FedTDD (adapted)**: FedAvg plus a pool of *fully synthetic* windows. After local training each client generates 32 windows as [f₁ | f₂], with f₁ = G(real past) and f₂ = G(f₁) (25 DDIM steps), so no real values leave the client. In the next round every client adds λ × (diffusion loss on a minibatch from the other clients' pool). λ is selected from {0.01, 0.1, 1}. The original FedTDD addresses feature misalignment between clients with a server-side distillation model; with univariate, aligned series that mechanism reduces to synthetic-data exchange, which is what is implemented. Synthetic-window traffic is counted in the cost table.
 * **Clustered FL (CFL)**: one-shot k-means (K = number of edges) of the client descriptors. One model is trained per cluster with FedAvg, and each client is evaluated with its cluster's model.
 * **Centralised (same U-Net)**: the same model and optimiser on the union of all training windows, with R × E epochs (identical number of optimiser steps per sample).
-* **CSDI (centralised)**: the official CSDI architecture for one feature (4 residual layers, 64 channels, 8-head temporal transformer, diffusion embedding 128, side information = time embedding 128 + feature embedding 16 + conditional mask), its quadratic schedule (T = 50, β ∈ [1e-4, 0.5]) and ancestral sampling, trained on the pooled data with the same budget.
+* **CSDI (centralised)**: the official CSDI architecture for one feature (4 residual layers, 64 channels, 8-head temporal transformer, diffusion embedding 128, side information = time embedding 128 + feature embedding 16 + conditional mask), its quadratic schedule (T = 50, β ∈ [1e-4, 0.5]) and ancestral sampling, trained on the pooled data with the same budget. Initialisation (Kaiming-normal 1×1 convolutions, zero output weight) and the interleaved sinusoidal time embedding follow the official code; the transformer's dropout (0.1) is disabled at evaluation.
 * **FedAvg + Gaussian LSTM**: 2-layer LSTM (64 units), Gaussian likelihood, teacher forcing on the future positions, ancestral sampling.
 * **FedAvg + WGAN-GP**: conditional generator (convolutional past encoder + noise 32 → MLP → tanh future) and critic on [past | future]. One critic update per minibatch, one generator update every 5 minibatches, gradient penalty 10, Adam(0.5, 0.9) without weight decay. Both networks are averaged.
 * **FedTS-HDiff**: per round, descriptors → sequential softmax assignment to K edges (a = 10, b = 0, τ = 1; size penalty (n_k + n_i)/n̄) → κ edge rounds (each: local training from the edge model, then edge aggregation with w_i ∝ n_i^α exp(β(μ_i − 1))) → cloud aggregation with q_k ∝ n_k^α exp(β(μ_k − 1)). α = 1; β is selected on validation from {0.5, 1, 2}; κ = 1 unless stated.
@@ -69,3 +69,10 @@ At rounds 1, 25, R/2 and after the last round, every client's gradient of its lo
 ## 8. Cost accounting
 
 Bytes are counted analytically from the parameter count (FP32): client links = upload + download of every participant per edge round (+ descriptor floats), and cloud = traffic that crosses the cloud server (flat methods: all clients; hierarchical: K edge models up and down). Wall-clock is measured with CUDA synchronisation: local training (sum, and per-edge-round maximum = time with parallel clients), grouping and aggregation per round, and sampling time per window (100 samples) at each DDIM step count. Peak GPU memory is also recorded. Cost runs are 10-round runs with one worker on an otherwise idle A100.
+
+## 9. Methods available but not in the campaign
+
+`scaffold` (option II control variates) is implemented for completeness but is not run: option II
+estimates the mean gradient as (x − y_i)/(Kη), which holds for plain SGD only. Under the AdamW
+protocol used for every method, the control variates would be on the scale of normalised Adam
+steps rather than gradients.

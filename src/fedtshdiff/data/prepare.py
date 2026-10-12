@@ -45,7 +45,10 @@ URLS = {
     "ptbxl": "https://physionet.org/static/published-projects/ptb-xl/"
              "ptb-xl-a-large-publicly-available-electrocardiography-dataset-1.0.3.zip",
     "electricity": "https://archive.ics.uci.edu/static/public/321/electricityloaddiagrams20112014.zip",
+    # the DCRNN metr-la.h5 as redistributed (float32, key "data") by Torch Spatiotemporal, pinned v1.0.0
+    "metrla": "https://huggingface.co/datasets/TorchSpatiotemporal/ProcessedDatasets/resolve/v1.0.0/traffic/metr_la.zip",
 }
+METRLA_NAMES = ("metr-la.h5", "metr_la.h5")
 
 
 # ======================================================================================
@@ -234,7 +237,9 @@ def _read_metrla(path: Path) -> tuple[np.ndarray, list[str]]:
         import h5py
 
         with h5py.File(path, "r") as f:
-            g = f["df"]
+            # DCRNN stores the frame under "df", the Torch Spatiotemporal copy under "data"
+            key = next(k for k in f.keys() if "block0_values" in f[k])
+            g = f[key]
             values = np.asarray(g["block0_values"], dtype=np.float64)
             cols = [c.decode() if isinstance(c, bytes) else str(c) for c in g["axis0"][()]]
         return values, cols
@@ -243,10 +248,10 @@ def _read_metrla(path: Path) -> tuple[np.ndarray, list[str]]:
 def prepare_metrla(raw_dir: Path, *, past_len: int = 64, future_len: int = 64, stride: int = 32,
                    max_windows: int = 1000, min_windows: int = 100,
                    max_missing_fraction: float = 0.2) -> PreparedDataset:
-    files = list(raw_dir.rglob("metr-la.h5"))
+    files = [p for name in METRLA_NAMES for p in raw_dir.rglob(name)]
     if not files:
-        raise FileNotFoundError(f"{raw_dir}: metr-la.h5 not found. Download it from the DCRNN "
-                                "repository (https://github.com/liyaguang/DCRNN) and place it there.")
+        raise FileNotFoundError(f"{raw_dir}: metr-la.h5 / metr_la.h5 not found (use --download, or place the "
+                                "DCRNN file from https://github.com/liyaguang/DCRNN there)")
     values, cols = _read_metrla(files[0])
     clients: list[ClientWindows] = []
     dropped: dict[str, float] = {}
@@ -268,7 +273,8 @@ def prepare_metrla(raw_dir: Path, *, past_len: int = 64, future_len: int = 64, s
             continue
         clients.append(ClientWindows(cid, X, np.full(X.shape[0], -1, dtype=np.int64)))
     meta = {
-        "source": "METR-LA (DCRNN release, metr-la.h5)",
+        "source": f"METR-LA (DCRNN release) from {files[0].name}",
+        "shape": list(values.shape),
         "preprocessing": {"past_len": past_len, "future_len": future_len, "stride": stride,
                           "max_windows": max_windows, "min_windows": min_windows,
                           "missing": "zero readings treated as missing; forward/backward fill",
@@ -346,9 +352,13 @@ def download_raw(name: str, raw_dir: Path) -> None:
                     with zipfile.ZipFile(inner) as z:
                         z.extractall(inner.parent)
     elif name == "metrla":
-        if not list(raw_dir.rglob("metr-la.h5")):
-            raise FileNotFoundError(
-                f"METR-LA cannot be downloaded automatically. Place metr-la.h5 (DCRNN release) in {raw_dir}.")
+        if not any(list(raw_dir.rglob(n)) for n in METRLA_NAMES):
+            archive = _download(URLS["metrla"], raw_dir / "metr_la.zip")
+            with zipfile.ZipFile(archive) as z:
+                for member in z.namelist():
+                    if not (raw_dir / member).resolve().is_relative_to(raw_dir.resolve()):
+                        raise ValueError(f"unsafe path in archive: {member}")
+                z.extractall(raw_dir)
 
 
 BUILDERS = {

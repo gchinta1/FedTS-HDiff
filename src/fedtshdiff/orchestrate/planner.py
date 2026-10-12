@@ -76,10 +76,12 @@ def selection_path(root: Path, sel_id: str) -> Path:
 
 
 def _tune_run_dirs(root: Path, specs: list[TaskSpec], dataset: str, method: str) -> list[tuple[float, TaskSpec]]:
-    key = TUNING_GRID[method][0]
+    """Tuning runs of (dataset, method) for the values of the *current* grid only."""
+    key, grid = TUNING_GRID[method]
     out = []
     for sp in specs:
-        if "tune" in (sp.groups or {sp.group}) and sp.dataset == dataset and sp.overrides.get("method") == method:
+        if ("tune" in (sp.groups or {sp.group}) and sp.dataset == dataset and sp.overrides.get("method") == method
+                and float(sp.overrides[key]) in grid):
             out.append((float(sp.overrides[key]), sp))
     return out
 
@@ -125,12 +127,17 @@ def resolve_config(spec: TaskSpec, data_root: str, selections: dict[str, Any]) -
     return build_config(dataset=spec.dataset, overrides=ov)
 
 
-def build_plan(root: Path, specs: list[TaskSpec], data_root: str) -> Plan:
+def build_plan(root: Path, specs: list[TaskSpec], data_root: str,
+               fallback_hashes: dict[str, str] | None = None) -> Plan:
+    """``fallback_hashes`` supplies the data hash of datasets not prepared under ``data_root``
+    (analysis of exported results on another machine)."""
     root = Path(root)
     hashes: dict[str, str] = {}
     for ds in sorted({s.dataset for s in specs}):
         if (dataset_dir(data_root, ds) / "SHA256SUMS").exists():
             hashes[ds] = data_hash(data_root, ds)
+        elif fallback_hashes and ds in fallback_hashes:
+            hashes[ds] = fallback_hashes[ds]
     planned: list[PlannedTask] = []
     fingerprints: dict[str, str] = {}
     # first pass: tasks without selections (tuning runs included)
@@ -168,10 +175,41 @@ def build_plan(root: Path, specs: list[TaskSpec], data_root: str) -> Plan:
 
 
 def write_manifest(root: Path, specs: list[TaskSpec], meta: dict[str, Any]) -> None:
-    atomic_write_json(Path(root) / "campaign.json", {
-        **meta,
-        "groups": sorted({g for s in specs for g in (s.groups or {s.group})}, key=lambda g: GROUPS.index(g) if g in GROUPS else 99),
-        "tasks": [{"task_id": s.task_id, "dataset": s.dataset, "seed": s.seed, "groups": sorted(s.groups),
-                   "labels": sorted(s.labels), "overrides": s.overrides, "select": s.select,
-                   "exclusive": s.exclusive} for s in specs],
-    })
+    """Record the tasks of this invocation in ``campaign.json``, *merged* with those recorded by
+    earlier invocations on the same root (staged ``--only`` launches), so the analysis sees every
+    task ever scheduled there; a task's groups/labels are the union over invocations."""
+    path = Path(root) / "campaign.json"
+    old = read_json(path) if path.exists() else {}
+    tasks = {t["task_id"]: t for t in old.get("tasks", [])}
+    # a task of this invocation supersedes an earlier task with the same (dataset, seed, label) but a
+    # different configuration (e.g. --no-tuning, or a changed suite definition): latest wins
+    current = {(s.dataset, s.seed, s.label): s.task_id for s in specs}
+    for tid, t in list(tasks.items()):
+        if current.get((t["dataset"], t["seed"], t.get("label"))) not in (None, tid):
+            del tasks[tid]
+    for s in specs:
+        new = {"task_id": s.task_id, "group": s.group, "label": s.label, "dataset": s.dataset, "seed": s.seed,
+               "groups": sorted(s.groups),
+               "labels": sorted(s.labels), "overrides": s.overrides, "select": s.select,
+               "exclusive": s.exclusive}
+        if s.task_id in tasks:
+            new["groups"] = sorted(set(new["groups"]) | set(tasks[s.task_id]["groups"]))
+            new["labels"] = sorted(set(new["labels"]) | set(tasks[s.task_id]["labels"]))
+        tasks[s.task_id] = new
+    groups = {g for t in tasks.values() for g in t["groups"]}
+    atomic_write_json(path, {**old, **meta,
+                             "groups": sorted(groups, key=lambda g: GROUPS.index(g) if g in GROUPS else 99),
+                             "tasks": list(tasks.values())})
+
+
+def specs_from_manifest(root: Path) -> list[TaskSpec]:
+    """Task specs recorded in ``campaign.json`` (for analysis and status of the whole root)."""
+    out = []
+    for t in read_json(Path(root) / "campaign.json")["tasks"]:
+        sp = TaskSpec(t["group"], t["label"], t["dataset"], t["seed"], dict(t["overrides"]),
+                      exclusive=t["exclusive"], select=dict(t["select"]), groups=set(t["groups"]),
+                      labels=set(t["labels"]))
+        if sp.task_id != t["task_id"]:
+            raise ValueError(f"campaign.json task {t['task_id']} does not reproduce its id ({sp.task_id})")
+        out.append(sp)
+    return out

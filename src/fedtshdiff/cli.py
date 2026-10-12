@@ -75,14 +75,15 @@ def _cmd_campaign(a: argparse.Namespace) -> int:
     root = Path(a.root).resolve()
     root.mkdir(parents=True, exist_ok=True)
     specs = _specs(a)
-    write_manifest(root, specs, {"data_root": str(Path(a.data_root).resolve()), "created": time.time(),
-                                 "tuned": not a.no_tuning})
     plan = build_plan(root, specs, str(Path(a.data_root).resolve()))
     _print_plan(plan)
+    slots = _checked_slots(a)
     if a.dry_run:
+        print(f"slots: {', '.join(s.slot_id for s in slots)}")
         return 0
-    atomic_write_json(root / "env.json", runtime_record())
-    slots = parse_slots(a.gpus, a.slots_per_gpu)
+    write_manifest(root, specs, {"data_root": str(Path(a.data_root).resolve()), "created": time.time(),
+                                 "tuned": not a.no_tuning})
+    atomic_write_json(root / "env.json", runtime_record(cuda_devices=False))
     sched = Scheduler(root, specs, str(Path(a.data_root).resolve()), slots, continue_on_error=a.continue_on_error,
                       poll=a.poll)
     state = sched.run()
@@ -92,6 +93,24 @@ def _cmd_campaign(a: argparse.Namespace) -> int:
 
         print(f"report: {analyse(root, a.data_root) / 'report.md'}")
     return 0 if state in ("complete",) else 1
+
+
+def _checked_slots(a: argparse.Namespace):
+    """Parse the GPU slots and refuse any slot on a forbidden *physical* GPU (e.g. a production
+    service's device), whatever the inherited CUDA_VISIBLE_DEVICES says."""
+    import os
+
+    from .orchestrate.scheduler import inherited_visible_devices, parse_slots
+
+    forbid = {g.strip() for g in (a.forbid_gpus or os.environ.get("FEDTS_FORBID_GPUS", "")).split(",") if g.strip()}
+    if forbid and a.gpus.strip().lower() == "auto" and inherited_visible_devices() is None:
+        raise SystemExit(f"--gpus auto without a CUDA_VISIBLE_DEVICES mask would expose forbidden GPUs {sorted(forbid)}; "
+                         "pass an explicit --gpus list or set the mask")
+    slots = parse_slots(a.gpus, a.slots_per_gpu)
+    bad = sorted({s.device for s in slots if s.device in forbid})
+    if bad:
+        raise SystemExit(f"refusing to schedule on forbidden GPU(s) {bad} (--forbid-gpus/FEDTS_FORBID_GPUS)")
+    return slots
 
 
 def _cmd_preflight(a: argparse.Namespace) -> int:
@@ -115,7 +134,7 @@ def _cmd_preflight(a: argparse.Namespace) -> int:
     free = shutil.disk_usage(root).free / 2**30
     report["checks"]["disk_free_gib"] = free
     report["checks"]["cuda"] = torch.cuda.is_available()
-    slots = parse_slots(a.gpus, a.slots_per_gpu)
+    slots = _checked_slots(a)
     report["slots"] = [s.slot_id for s in slots]
     bad = [k for k, v in report["checks"].items() if isinstance(v, str) and v.startswith("FAIL")]
     if free < 20:
@@ -208,6 +227,8 @@ def main(argv: list[str] | None = None) -> int:
         s.add_argument("--data-root", default="data")
         s.add_argument("--gpus", default="auto")
         s.add_argument("--slots-per-gpu", type=int, default=4)
+        s.add_argument("--forbid-gpus", help="comma-separated physical GPU ids that must never be used "
+                                             "(default: $FEDTS_FORBID_GPUS)")
         s.add_argument("--datasets", help="comma-separated subset of mitbih,ptbxl,electricity,metrla")
         if name == "campaign":
             s.add_argument("--only", help="comma-separated groups")

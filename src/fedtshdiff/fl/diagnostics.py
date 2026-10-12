@@ -26,6 +26,7 @@ import numpy as np
 import torch
 from scipy import stats
 
+from ..models.diffusion import diffusion_loss
 from ..utils import derive_seed, make_generator
 from .grouping import aggregation, assign_edges, compute_descriptors, reference
 from .trainer import FederatedTrainer
@@ -51,8 +52,16 @@ def client_gradients(tr: FederatedTrainer, r: int, clients: list[int]) -> torch.
         xb = X[sel[: cfg.diag_windows]]
         gen = make_generator(tr.device, derive_seed(cfg.seed, r, "crn"))  # same draws for every client
         fm.grad.zero_()
-        # CRN: per-sample timesteps/noise come from the same stream; equal batch sizes keep them aligned
-        fore.loss(xb, gen).backward()
+        if fore.kind == "diffusion":
+            # CRN: draw t/noise for diag_windows samples and use the first b, so a client with fewer
+            # windows still gets exactly the same draws for its samples as every other client
+            t_all = torch.randint(0, fore.sched.T, (cfg.diag_windows,), device=tr.device, generator=gen)
+            n_all = torch.randn((cfg.diag_windows, 1, cfg.future_len), device=tr.device, generator=gen)
+            b = xb.shape[0]
+            diffusion_loss(fore.module, fore.sched, xb[:, None, : cfg.past_len], xb[:, None, cfg.past_len:], gen,
+                           t=t_all[:b], noise=n_all[:b]).backward()
+        else:
+            fore.loss(xb, gen).backward()
         g = fm.grad[sl].detach().clone()
         rows.append(g)
     fm.load(keep)

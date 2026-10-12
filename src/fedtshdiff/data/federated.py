@@ -73,16 +73,20 @@ class FederatedData:
 
         return {"dataset": self.name, "clients": self.n_clients, "train": stats(tr), "val": stats(va),
                 "test": stats(te), "past_len": self.past_len, "future_len": self.future_len,
+                "split_gap": self.meta.get("split_gap"),
                 "classes": self.class_names, "data_hash": self.data_hash}
 
 
-def _split_indices(n: int, cfg: Config, rng: np.random.Generator) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def _split_indices(n: int, cfg: Config, rng: np.random.Generator, gap: int = 0) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Per-client train/val/test split.
 
     ``time``: earliest (1-test_ratio) windows for training, the rest for testing (as in the
     original PTB-XL code).  ``random``: a seeded permutation (as in the original MIT-BIH code).
     The validation part is the *last* ``val_ratio`` share of the training part, so it is
-    temporally between train and test under the time split.
+    temporally between train and test under the time split.  Under the time split ``gap``
+    windows are dropped from the end of the training block: sliding windows overlap, and without
+    the gap the first held-out windows' forecast targets would lie inside training windows.
+    (Validation windows are never trained on, so they separate training from test.)
     """
     n_test = max(1, int(cfg.test_ratio * n))
     order = np.arange(n) if cfg.split == "time" else rng.permutation(n)
@@ -90,8 +94,18 @@ def _split_indices(n: int, cfg: Config, rng: np.random.Generator) -> tuple[np.nd
     rest = order[: n - n_test] if cfg.split == "time" else np.sort(order[n_test:])
     n_val = int(round(cfg.val_ratio * len(rest)))
     val = rest[len(rest) - n_val:] if n_val else rest[:0]
-    train = rest[: len(rest) - n_val]
+    train = rest[: max(0, len(rest) - n_val - (gap if cfg.split == "time" else 0))]
     return train, val, test
+
+
+def split_gap(cfg: Config, meta: dict) -> int:
+    """Embargo (in windows) between training and held-out windows for the time split."""
+    if cfg.split_gap >= 0:
+        return cfg.split_gap
+    stride = (meta.get("preprocessing") or {}).get("stride")
+    if cfg.split != "time" or not stride:
+        return 0
+    return max(0, -(-cfg.future_len // int(stride)) - 1)
 
 
 def build_federated(cfg: Config, prepared: PreparedDataset | None = None, data_hash: str | None = None) -> FederatedData:
@@ -107,15 +121,16 @@ def build_federated(cfg: Config, prepared: PreparedDataset | None = None, data_h
     if cfg.max_clients:
         raw = raw[: cfg.max_clients]
     rng = np.random.default_rng(cfg.split_seed)
+    gap = split_gap(cfg, prepared.meta)
     clients: list[Client] = []
     for k, rc in enumerate(raw):
         X, y = rc.X, rc.y
         if cfg.max_windows and X.shape[0] > cfg.max_windows:
             X, y = X[: cfg.max_windows], y[: cfg.max_windows]
-        tr, va, te = _split_indices(X.shape[0], cfg, rng)
+        tr, va, te = _split_indices(X.shape[0], cfg, rng, gap)
         clients.append(Client(k, rc.cid, X[tr], y[tr], X[va], X[te], y[te]))
     return FederatedData(prepared.name, cfg.past_len, cfg.future_len, prepared.class_names, clients,
-                         data_hash or "unhashed", prepared.meta)
+                         data_hash or "unhashed", {**prepared.meta, "split_gap": gap})
 
 
 def eval_set(data: FederatedData, n_windows: int, seed: int, device: torch.device,

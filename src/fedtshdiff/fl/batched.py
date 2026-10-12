@@ -106,6 +106,27 @@ class BatchedUNet:
                      p["out_conv.2.weight"], p["out_conv.2.bias"])
 
 
+@torch.no_grad()
+def ddim_batched(net: BatchedUNet, W: torch.Tensor, sched, past: torch.Tensor, x_init: torch.Tensor,
+                 steps: int, spacing: str) -> torch.Tensor:
+    """Deterministic DDIM (eta = 0) for G parameter sets at once: W [G,P], past [G,N,1,P],
+    x_init [G,N,1,F] -> [G,N,1,F] clamped to [-1, 1].  Same update as models.diffusion.ddim_sample."""
+    from ..models.diffusion import ddim_timesteps
+
+    ts = ddim_timesteps(sched.T, steps, spacing)
+    ac = sched.alphas_cumprod
+    x = x_init
+    one = torch.tensor(1.0, device=x.device)
+    for i, t_int in enumerate(ts):
+        t = torch.full(x.shape[:2], t_int, device=x.device, dtype=torch.long)
+        eps = net.eps(W, x, past, t)
+        a_t = ac[t_int]
+        a_prev = ac[ts[i + 1]] if i + 1 < len(ts) else one
+        x0 = (x - torch.sqrt(1 - a_t) * eps) / torch.sqrt(a_t)
+        x = torch.sqrt(a_prev) * x0 + torch.sqrt(torch.clamp(1 - a_prev, min=0.0)) * eps
+    return x.clamp(-1, 1)
+
+
 def _pool(z: torch.Tensor) -> torch.Tensor:
     return z.view(*z.shape[:3], -1, 2).amax(-1)
 
@@ -292,6 +313,8 @@ def _train_chunk(tr, net: BatchedUNet, ids, starts, sub, Diverged, LocalResult):
                 _adamw_rows(tr, W, M, V, stepc[seg], cr, sl, g, tr.opt.specs[seg])
     if dev.type == "cuda":
         torch.cuda.synchronize(dev)
+    # Per-client times cannot be separated in a batched pass: every client gets the chunk average.
+    # Per-client compute (cost table) is measured by the client_batch=1 cost runs.
     seconds = (time.perf_counter() - t0) / C
     means = (loss_sum / torch.tensor([max(p.steps, 1) for p in plans], device=dev)).tolist()
     finite = torch.isfinite(W).all(dim=1).tolist()

@@ -30,7 +30,9 @@ class GaussianLSTM(nn.Module):
         mu, sigma = self._params(h)
         target = x_full[:, 1:]
         sl = slice(past_len - 1, None)
-        dist = torch.distributions.Normal(mu[:, sl], sigma[:, sl])
+        # no argument validation: NaNs must reach the trainer's divergence check (recorded as
+        # "diverged") instead of raising here and failing the worker
+        dist = torch.distributions.Normal(mu[:, sl], sigma[:, sl], validate_args=False)
         return -dist.log_prob(target[:, sl]).mean()
 
     @torch.no_grad()

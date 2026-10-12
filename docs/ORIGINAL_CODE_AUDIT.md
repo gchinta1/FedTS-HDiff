@@ -91,6 +91,35 @@ distribution, which differs from `phi_bar` on imbalanced data (PTB-XL is dominat
 *New code:* `homogeneity_ref=mean` targets the population mix. It is reported as an ablation
 (`popmean_ref`) and in the diagnostics (`balance_popmean/label`).
 
+### A9. Time splits put test forecast targets inside training windows *(verified by derivation)*
+Windows overlap (PTB-XL: length 128, stride 8; Electricity: 192/16; METR-LA: 128/32), and the
+submitted time split puts the test block *directly* after the training block. On PTB-XL, training
+window 87 covers samples [696, 824), while the forecast target of test window 88 is [768, 832).
+So 56 of its 64 target values were training inputs, and the same holds for the first 7 of the
+22 test windows of every record. The models are therefore partly scored on data they were
+trained on.
+
+*New code:* under the time split, ⌈future_len/stride⌉ − 1 windows are dropped between the training
+block and the next held-out block (7 on PTB-XL, 5 on Electricity, 1 on METR-LA; `split_gap`).
+The validation block, which is never trained on, then separates training from test. The
+`reproduce` group keeps the submitted (overlapping) split.
+
+### A10. The paper's equations differ from the code (the code is what ran)
+The revision runs the original scripts' rules; the manuscript text must be corrected to match:
+
+* **Size normaliser n̄.** §3.3 says "n̄ is the average edge size". The code (original and
+  revision) divides by the *average client size*. With N = 300, K = 4 this makes the size term
+  about one unit per client, so it dominates the homogeneity term (≈ a_sel·Δμ ≈ 0.1–0.3).
+  Assignment is therefore mostly near-balanced client counts with homogeneity tie-breaking.
+* **Client weights.** §3.3 writes `w_i = n_i^α exp(β(μ'_{k,i} − 1))` with the candidate-edge
+  homogeneity μ'_{k,i}. The code uses the client's *own* homogeneity μ_i = 2 − ‖φ_i − u‖.
+* **Edge weights.** The theory (§4.1) defines q_k = Σ_{i∈C_k} p_i (data mass). The code weights
+  edges adaptively, q_k ∝ n_k^α exp(β(μ_k − 1)), so the bias B_w comes from both levels.
+* **b_sel** is added to every edge's score and cancels in the softmax. It cannot "prevent
+  imbalanced assignments" as stated; balance comes from the size term.
+* **Empty edges.** The original averaged the previous global model into the cloud model with a
+  small positive weight for an empty edge; the revision gives empty edges weight 0 (negligible for N ≫ K).
+
 ## B. Protocol issues to correct in the text
 
 | # | Issue | Revision |

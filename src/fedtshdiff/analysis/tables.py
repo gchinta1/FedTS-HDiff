@@ -115,27 +115,34 @@ def method_table(df: pd.DataFrame, labels: list[str], datasets: Iterable[str], m
 
 
 def ddim_table(ddim: pd.DataFrame, out: Path) -> None:
-    d = ddim[ddim["task_id"].str.contains("__fedts_hdiff__")]
+    """Quality from the 5-seed main runs; seconds/window from the exclusive-GPU cost runs
+    (main runs share their GPU with another worker, so their timings are not clean)."""
+    labels = ddim["labels"].str.split(",")
+    d = ddim[labels.apply(lambda ls: "fedts_hdiff" in ls)]
+    timing = ddim[labels.apply(lambda ls: "cost_fedts_hdiff" in ls)]
     if d.empty:
         return
+    clean = timing.groupby(["dataset", "ddim_steps"])["sample_seconds_per_window"].mean()
     metrics = ["dtw_mean", "crps", "wis_90", "picp_90", "mpiw_90"]
     rows = []
     for (ds, steps), g in d.groupby(["dataset", "ddim_steps"]):
         row = {"dataset": ds, "steps": int(steps), "n": len(g)}
         for m in metrics + ["sample_seconds_per_window"]:
             row[f"{m}_mean"], row[f"{m}_sd"] = g[m].mean(), g[m].std(ddof=1)
+        row["sample_seconds_per_window_mean"] = clean.get((ds, steps), float("nan"))
         rows.append(row)
     t = pd.DataFrame(rows).sort_values(["dataset", "steps"])
     lines = ["\\begin{table}[t]", "\\centering",
              "\\caption{Inference cost--quality trade-off of DDIM sampling for FedTS-HDiff (same trained models, "
-             "100 samples per window; seconds per window on one A100).}", "\\label{tab:ddim}",
+             "100 samples per window; seconds per window measured alone on one A100).}", "\\label{tab:ddim}",
              "\\resizebox{\\columnwidth}{!}{", "\\begin{tabular}{llcccccc}", "\\toprule",
              "Dataset & Steps & " + " & ".join(f"{METRICS[m][0]}" for m in metrics) + " & s/window \\\\", "\\midrule"]
     for ds, g in t.groupby("dataset", sort=False):
         for k, (_, r) in enumerate(g.iterrows()):
             lines.append(f"{DATASET_NAMES.get(ds, ds) if k == 0 else ''} & {r['steps']} & " +
                          " & ".join(_fmt(r[f'{m}_mean'], r[f'{m}_sd']) for m in metrics) +
-                         f" & {r['sample_seconds_per_window_mean']:.3f} \\\\")
+                         " & " + ("--" if math.isnan(r['sample_seconds_per_window_mean'])
+                                  else f"{r['sample_seconds_per_window_mean']:.3f}") + " \\\\")
         lines.append("\\midrule")
     lines[-1] = "\\bottomrule"
     lines += ["\\end{tabular}}", "\\end{table}", ""]
@@ -222,7 +229,8 @@ def scalability_table(df: pd.DataFrame, out: Path, metric: str = "crps") -> None
     d = df[(df["group"] == "scalability") & (df["status"] == "complete")].copy()
     if d.empty:
         return
-    summ = seed_summary(d, ["label"], [metric, "dtw_mean", "cost_mean_bytes_cloud", "cost_mean_local_seconds_max"])
+    # no per-client timings here: client-batched runs only measure chunk averages (see tab_cost)
+    summ = seed_summary(d, ["label"], [metric, "dtw_mean", "cost_mean_bytes_cloud"])
     _write(out, "tab_scalability", _scalability_latex(summ, metric), summ)
 
 

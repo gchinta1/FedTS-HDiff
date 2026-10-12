@@ -2,7 +2,8 @@
 dataset: mitbih
 past_len: 64
 future_len: 64
-split: random            # original: per-client random split with seed 123
+split: random            # same policy as the original (per-client random 80/20, seed 123); the exact
+                         # partition differs (numpy Generator vs legacy np.random; beat-only windows)
 split_seed: 123
 test_ratio: 0.2
 val_ratio: 0.1           # revision: 10% of each client's training part for hyperparameter selection

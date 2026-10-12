@@ -83,7 +83,7 @@ def analyse(root: str | Path, data_root: str | Path | None = None) -> Path:
     out = root / "analysis"
     tdir, fdir = out / "tables", out / "figures"
     tdir.mkdir(parents=True, exist_ok=True)
-    res = collect(root)
+    res = collect(root, data_root)
     if res.runs.empty:
         (out / "report.md").write_text("# FedTS-HDiff revision analysis\n\nNo sealed runs yet.\n", encoding="utf-8")
         return out

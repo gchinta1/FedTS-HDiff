@@ -32,7 +32,7 @@ from ..config import Config
 from ..data.federated import Client, FederatedData
 from ..models.forecaster import Forecaster
 from ..utils import Stopwatch, derive_seed, make_generator
-from .batched import BatchedUNet, supports_batched, train_batched
+from .batched import BatchedUNet, ddim_batched, supports_batched, train_batched
 from .flat import FlatAdamW, FlatModel, OptState
 from .grouping import Assignment, Grouper, aggregation, compute_descriptors, kmeans, reference
 
@@ -72,6 +72,7 @@ class _Ctx:
                  correction: Callable[[slice, torch.Tensor], torch.Tensor] | None,
                  extra: Callable[[], torch.Tensor | None] | None):
         self.t, self.state, self.gen, self.correction, self._extra = trainer, state, gen, correction, extra
+        self.batches = 0
 
     def extra_loss(self) -> torch.Tensor | None:
         return self._extra() if self._extra else None
@@ -248,6 +249,39 @@ class FederatedTrainer:
         return extra
 
     @torch.no_grad()
+    def _fedtdd_generate_many(self, ids: list[int], vecs: list[torch.Tensor]) -> dict[int, torch.Tensor]:
+        """Synthetic windows of several clients.  Client-batched when possible: the random draws are
+        taken from ``self.gen`` in exactly the sequential order (per client: indices, f1 noise, f2
+        noise), and DDIM with eta = 0 is deterministic given them, so both paths agree."""
+        cfg, dev = self.cfg, self.device
+        if self._batched_net is None or len(ids) < 2 or not self.fore.deterministic_given_init:
+            out = {}
+            for i, v in zip(ids, vecs):
+                self.fm.load(v)
+                out[i] = self._fedtdd_generate(i)
+            return out
+        S, P, Fl = cfg.fedtdd_syn_per_client, cfg.past_len, cfg.future_len
+        draws = []
+        for i in ids:
+            X = self.train_clients[i].train_t
+            idx = torch.randint(0, X.shape[0], (S,), device=dev, generator=self.gen)
+            n1 = torch.randn((S, 1, Fl), device=dev, generator=self.gen)
+            n2 = torch.randn((S, 1, Fl), device=dev, generator=self.gen)
+            draws.append((X[idx, :P], n1, n2))
+        out = {}
+        for c0 in range(0, len(ids), cfg.client_batch):
+            sl = slice(c0, c0 + cfg.client_batch)
+            W = torch.stack(vecs[sl])
+            past = torch.stack([d[0] for d in draws[sl]])[:, :, None, :]
+            f1 = ddim_batched(self._batched_net, W, self.fore.sched, past,
+                              torch.stack([d[1] for d in draws[sl]]), cfg.fedtdd_syn_ddim_steps, cfg.ddim_spacing)
+            f2 = ddim_batched(self._batched_net, W, self.fore.sched, f1,
+                              torch.stack([d[2] for d in draws[sl]]), cfg.fedtdd_syn_ddim_steps, cfg.ddim_spacing)
+            for k, i in enumerate(ids[sl]):
+                out[i] = torch.cat([f1[k, :, 0], f2[k, :, 0]], dim=1)
+        return out
+
+    @torch.no_grad()
     def _fedtdd_generate(self, i: int) -> torch.Tensor:
         """Fully synthetic windows from client i's freshly trained model (loaded in fm)."""
         cfg = self.cfg
@@ -267,7 +301,10 @@ class FederatedTrainer:
         if self.cfg.participation >= 1.0 or self.method == "central":
             return list(range(N))
         m = max(1, int(round(self.cfg.participation * N)))
-        return sorted(self.rng.choice(N, size=m, replace=False).tolist())
+        # own stream per (seed, round): every method samples the same clients, independent of how
+        # much randomness grouping consumed (self.rng is the grouping/server stream)
+        rng = np.random.default_rng(derive_seed(self.cfg.seed, "participants", self.current_round))
+        return sorted(rng.choice(N, size=m, replace=False).tolist())
 
     def run_round(self, r: int) -> RoundLog:
         self.current_round = r
@@ -299,14 +336,14 @@ class FederatedTrainer:
                     dyn_sum.add_(res.vec)
                 if m == "scaffold":
                     c_delta.add_(self.state(i)._c_delta)  # type: ignore[attr-defined]
-                if m == "fedtdd":
-                    self.fm.load(res.vec)
-                    new_pool[i] = self._fedtdd_generate(i)
                 acc.add_(res.vec, alpha=float(w))
                 sq += float(w) * float(delta.pow(2).sum())
                 losses.append(res.loss)
                 secs.append(res.seconds)
                 steps_list.append(res.steps)
+        if m == "fedtdd":
+            with self.watch.time("synthetic"):
+                new_pool = self._fedtdd_generate_many(parts, [res.vec for res in results])
         with self.watch.time("aggregate"):
             mean_delta_sq = float((acc - start).pow(2).sum())
             if m == "fednova":

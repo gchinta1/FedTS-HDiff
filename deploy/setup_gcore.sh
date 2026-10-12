@@ -40,6 +40,8 @@ for row in manifest["files"]:
     assert p.is_file() and hashlib.sha256(p.read_bytes()).hexdigest() == row["sha256"], row["path"]
 print(json.dumps({"release": str(root), "verified_files": len(manifest["files"]), "code_digest": manifest["code_digest"]}))
 PY
+# zipfile.extractall drops Unix modes
+find "$release/revision_code" -name '*.sh' -exec chmod 755 {} +
 
 if [ ! -e "$venv" ]; then
     python3 -m venv --without-pip "$venv"
@@ -49,13 +51,15 @@ if [ ! -e "$venv" ]; then
 fi
 "$venv/bin/python" -m pip uninstall -y fedstop >/dev/null 2>&1 || true
 "$venv/bin/python" -m pip install --no-deps --no-build-isolation -e "$release/revision_code"
-"$venv/bin/python" -c 'import wfdb' 2>/dev/null || "$venv/bin/python" -m pip install "wfdb>=4.1" ||
-    echo "WARNING: wfdb not installed; prepare MIT-BIH/PTB-XL elsewhere and copy data/processed"
-"$venv/bin/python" -c 'import psutil, h5py, scipy, pandas, yaml' || "$venv/bin/python" -m pip install psutil h5py scipy pandas pyyaml
+# only add what is missing; never upgrade the copied CUDA/numeric stack
+"$venv/bin/python" -c 'import psutil' 2>/dev/null || "$venv/bin/python" -m pip install "psutil>=5.9"
+"$venv/bin/python" -c 'import wfdb' 2>/dev/null || "$venv/bin/python" -m pip install --upgrade-strategy only-if-needed "wfdb>=4.1"
+"$venv/bin/python" -c 'import torch, numpy, scipy, pandas, yaml, h5py, matplotlib, wfdb, psutil; print("imports ok", torch.__version__, numpy.__version__)'
+"$venv/bin/python" -m pip check
 
 cd "$release/revision_code"
 CUDA_VISIBLE_DEVICES="" "$venv/bin/python" -m pytest -q -p no:cacheprovider --junitxml "$dep/tests.xml" | tee "$dep/tests.log"
-export CUDA_VISIBLE_DEVICES=$GPUS OMP_NUM_THREADS=1 MKL_NUM_THREADS=1
+export CUDA_VISIBLE_DEVICES=$GPUS CUDA_DEVICE_ORDER=PCI_BUS_ID OMP_NUM_THREADS=1 MKL_NUM_THREADS=1
 "$venv/bin/python" - "$dep" <<'PY'
 import json, sys
 from pathlib import Path

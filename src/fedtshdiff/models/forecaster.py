@@ -36,6 +36,7 @@ class SegmentSpec:
 
 class StepContext(Protocol):
     gen: torch.Generator
+    batches: int  # minibatches already processed in this client's local training call
 
     def step(self, loss: torch.Tensor, segment: str) -> None: ...
 
@@ -60,16 +61,26 @@ class Forecaster:
         raise NotImplementedError
 
     def sample(self, past: torch.Tensor, K: int, gen: torch.Generator, steps: int | None = None,
-               chunk: int = 16384) -> torch.Tensor:
-        """past: [B, P] -> [B, K, F]; sequences are processed in chunks of ``chunk``."""
+               chunk: int = 16384, x_init: torch.Tensor | None = None) -> torch.Tensor:
+        """past: [B, P] -> [B, K, F]; sequences are processed in chunks of ``chunk``.
+
+        ``x_init`` ([B, K, F]) is the starting noise of deterministic samplers (DDIM, eta = 0);
+        models without such a sampler ignore it."""
         B = past.size(0)
         rep = past.repeat_interleave(K, dim=0)
+        init = x_init.reshape(B * K, self.future_len) if x_init is not None else None
         outs = []
         for s in range(0, rep.size(0), chunk):
-            outs.append(self._sample_flat(rep[s:s + chunk], gen, steps))
+            outs.append(self._sample_flat(rep[s:s + chunk], gen, steps,
+                                          None if init is None else init[s:s + chunk]))
         return torch.cat(outs, 0).view(B, K, self.future_len)
 
-    def _sample_flat(self, past: torch.Tensor, gen: torch.Generator, steps: int | None) -> torch.Tensor:
+    @property
+    def deterministic_given_init(self) -> bool:
+        return False
+
+    def _sample_flat(self, past: torch.Tensor, gen: torch.Generator, steps: int | None,
+                     x_init: torch.Tensor | None = None) -> torch.Tensor:
         raise NotImplementedError
 
     @property
@@ -113,14 +124,20 @@ class DiffusionForecaster(Forecaster):
         ctx.step(total, segment)
         return loss.detach()
 
-    def _sample_flat(self, past: torch.Tensor, gen: torch.Generator, steps: int | None) -> torch.Tensor:
+    @property
+    def deterministic_given_init(self) -> bool:
+        return self.cfg.sampler == "ddim" and self.cfg.ddim_eta == 0.0
+
+    def _sample_flat(self, past: torch.Tensor, gen: torch.Generator, steps: int | None,
+                     x_init: torch.Tensor | None = None) -> torch.Tensor:
         cfg = self.cfg
         p = past[:, None, :]
         if cfg.sampler == "ddpm":
             out = ddpm_sample(self.module, self.sched, p, self.future_len, gen)
         else:
             out = ddim_sample(self.module, self.sched, p, self.future_len, gen, steps or cfg.ddim_steps,
-                              cfg.ddim_eta, cfg.ddim_spacing)
+                              cfg.ddim_eta, cfg.ddim_spacing,
+                              None if x_init is None else x_init[:, None, :])
         return out[:, 0, :]
 
 
@@ -140,7 +157,8 @@ class LSTMForecaster(Forecaster):
         ctx.step(loss, segment)
         return loss.detach()
 
-    def _sample_flat(self, past: torch.Tensor, gen: torch.Generator, steps: int | None) -> torch.Tensor:
+    def _sample_flat(self, past: torch.Tensor, gen: torch.Generator, steps: int | None,
+                     x_init: torch.Tensor | None = None) -> torch.Tensor:
         return self.module.sample(past, self.future_len, gen)
 
 
@@ -154,7 +172,6 @@ class GANForecaster(Forecaster):
         super().__init__(cfg, device)
         self.module = GANPair(cfg.past_len, cfg.future_len, cfg.gan_noise_dim, cfg.gan_hidden).to(device)
         self.segments = [SegmentSpec("G", ("G.",), 0.5, 0.9, 0.0), SegmentSpec("D", ("D.",), 0.5, 0.9, 0.0)]
-        self._batches = 0
 
     def _z(self, n: int, gen: torch.Generator) -> torch.Tensor:
         return torch.randn((n, self.cfg.gan_noise_dim), device=self.device, generator=gen)
@@ -179,13 +196,14 @@ class GANForecaster(Forecaster):
         gp = ((grad.norm(2, dim=1) - 1) ** 2).mean()
         d_loss = D(fake_full).mean() - D(real_full).mean() + self.cfg.gan_gp * gp
         ctx.step(d_loss, "D")
-        self._batches += 1
-        if self._batches % self.cfg.gan_n_critic == 0:
+        ctx.batches += 1  # per local-training call: every client gets G steps at the same minibatches
+        if ctx.batches % self.cfg.gan_n_critic == 0:
             g_loss = self.loss(x_full, ctx.gen)
             ctx.step(g_loss, "G")
         return d_loss.detach()
 
-    def _sample_flat(self, past: torch.Tensor, gen: torch.Generator, steps: int | None) -> torch.Tensor:
+    def _sample_flat(self, past: torch.Tensor, gen: torch.Generator, steps: int | None,
+                     x_init: torch.Tensor | None = None) -> torch.Tensor:
         return self.module.G(past, self._z(past.size(0), gen))
 
     @property

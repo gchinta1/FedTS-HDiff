@@ -30,19 +30,42 @@ class Results:
         return self.runs[self.runs["group"] == name]
 
 
-def _task_rows(root: Path) -> list[dict[str, Any]]:
+def _task_rows(root: Path, data_root: str | Path | None = None) -> list[dict[str, Any]]:
+    """Tasks of the campaign whose sealed outputs are *current*: the seal's fingerprint must equal
+    the fingerprint the planner computes now (configuration, selected hyperparameters, data hash,
+    science version), so superseded results of rerun tasks never enter the tables."""
+    from ..orchestrate.planner import build_plan, specs_from_manifest
+
     manifest = read_json(root / "campaign.json")
-    return manifest["tasks"]
+    data_root = str(data_root or manifest["data_root"])
+    # datasets not prepared on this machine: take the data hash recorded by the sealed runs
+    fallback: dict[str, set[str]] = {}
+    for t in manifest["tasks"]:
+        meta = root / "runs" / t["task_id"] / "meta.json"
+        if (root / "runs" / t["task_id"] / "done.json").exists() and meta.exists():
+            fallback.setdefault(t["dataset"], set()).add(read_json(meta)["data_hash"])
+    ambiguous = {ds: h for ds, h in fallback.items() if len(h) > 1}
+    if ambiguous:
+        raise ValueError(f"runs of one dataset were produced from different prepared data: {ambiguous}")
+    plan = build_plan(root, specs_from_manifest(root), data_root, {ds: h.pop() for ds, h in fallback.items()})
+    done = {t.task_id for t in plan.by_state("done")}
+    rows = [t for t in manifest["tasks"] if t["task_id"] in done]
+    sealed = [t for t in manifest["tasks"] if (root / "runs" / t["task_id"] / "done.json").exists()]
+    if sealed and not rows:
+        raise ValueError(f"{len(sealed)} sealed runs but none matches the current plan (code or data changed?)")
+    keys = [(g, t["label"], t["dataset"], t["seed"]) for t in rows for g in t["groups"]]
+    dup = {k for k in keys if keys.count(k) > 1}
+    if dup:
+        raise ValueError(f"duplicate results for {sorted(dup)[:5]}: campaign.json lists superseded tasks")
+    return rows
 
 
-def collect(root: str | Path) -> Results:
+def collect(root: str | Path, data_root: str | Path | None = None) -> Results:
     root = Path(root)
     rows, ddim_rows, curves, rounds, diags = [], [], [], [], []
-    for t in _task_rows(root):
+    for t in _task_rows(root, data_root):
         run = root / "runs" / t["task_id"]
         done_p = run / "done.json"
-        if not done_p.exists():
-            continue
         done = read_json(done_p)
         cfg = {}
         if (run / "resolved_config.yaml").exists():
@@ -63,7 +86,7 @@ def collect(root: str | Path) -> Results:
             metrics["test_loss"] = final.get("test_loss")
             for key, v in final.items():
                 if isinstance(v, dict):
-                    ddim_rows.append({**base, "variant": key, "ddim_steps": v.get("ddim_steps"),
+                    ddim_rows.append({**base, "labels": ",".join(t["labels"]), "variant": key, "ddim_steps": v.get("ddim_steps"),
                                       **{m: v[m] for m in ("dtw_mean", "psd_l2", "div_dtw", "crps", "wis_90",
                                                            "picp_90", "mpiw_90", "calib_error",
                                                            "sample_seconds_per_window") if m in v}})

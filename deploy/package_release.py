@@ -51,11 +51,12 @@ def main() -> int:
     with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as z:
         for p, d in entries:
             info = zipfile.ZipInfo(f"revision_code/{p}", date_time=(2026, 1, 1, 0, 0, 0))
+            info.create_system = 3  # Unix, so the mode bits are meaningful
             info.external_attr = (0o755 if p.endswith(".sh") else 0o644) << 16
             z.writestr(info, d)
         z.writestr("revision_code/release/SOURCE_MANIFEST.json", json.dumps(manifest, indent=2) + "\n")
     sha = hashlib.sha256(archive.read_bytes()).hexdigest()
-    (dist / f"{name}.zip.sha256").write_text(f"{sha}  {archive.name}\n", encoding="utf-8")
+    (dist / f"{name}.zip.sha256").write_bytes(f"{sha}  {archive.name}\n".encode())  # LF for sha256sum -c
     print(json.dumps({"archive": str(archive), "sha256": sha, "code_digest": digest, "files": len(entries)}, indent=2))
     return 0
 

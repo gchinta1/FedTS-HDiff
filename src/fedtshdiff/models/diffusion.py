@@ -46,21 +46,29 @@ def ddim_timesteps(T: int, steps: int, spacing: str) -> list[int]:
 
 
 def diffusion_loss(eps_net: nn.Module, sched: Schedule, past: torch.Tensor, future: torch.Tensor,
-                   gen: torch.Generator) -> torch.Tensor:
+                   gen: torch.Generator, t: torch.Tensor | None = None,
+                   noise: torch.Tensor | None = None) -> torch.Tensor:
+    """Noise-prediction MSE on the future; ``t``/``noise`` may be given (common random numbers)."""
     b = future.size(0)
-    t = torch.randint(0, sched.T, (b,), device=future.device, generator=gen)
-    noise = torch.randn(future.shape, device=future.device, generator=gen)
+    if t is None:
+        t = torch.randint(0, sched.T, (b,), device=future.device, generator=gen)
+    if noise is None:
+        noise = torch.randn(future.shape, device=future.device, generator=gen)
     x_t = sched.sqrt_ac[t].view(-1, 1, 1) * future + sched.sqrt_om[t].view(-1, 1, 1) * noise
     return F.mse_loss(eps_net(x_t, past, t), noise)
 
 
 @torch.no_grad()
 def ddim_sample(eps_net: nn.Module, sched: Schedule, past: torch.Tensor, future_len: int,
-                gen: torch.Generator, steps: int, eta: float = 0.0, spacing: str = "trailing") -> torch.Tensor:
-    """past: [n, 1, P] -> futures [n, 1, F] clamped to [-1, 1] (as the original)."""
+                gen: torch.Generator, steps: int, eta: float = 0.0, spacing: str = "trailing",
+                x_init: torch.Tensor | None = None) -> torch.Tensor:
+    """past: [n, 1, P] -> futures [n, 1, F] clamped to [-1, 1] (as the original).
+
+    ``x_init`` ([n, 1, F]) fixes the starting noise; with eta = 0 the sample is then a
+    deterministic function of it (used for common random numbers across methods)."""
     n = past.size(0)
     ts = ddim_timesteps(sched.T, steps, spacing)
-    x = torch.randn((n, 1, future_len), device=past.device, generator=gen)
+    x = x_init if x_init is not None else torch.randn((n, 1, future_len), device=past.device, generator=gen)
     ac = sched.alphas_cumprod
     for i, t_int in enumerate(ts):
         t = torch.full((n,), t_int, device=past.device, dtype=torch.long)
@@ -94,10 +102,3 @@ def ddpm_sample(eps_net: nn.Module, sched: Schedule, past: torch.Tensor, future_
             sigma = torch.sqrt((1 - ac[t_int - 1]) / (1 - a_t) * b_t)
             x = x + sigma * torch.randn(x.shape, device=x.device, generator=gen)
     return x.clamp(-1, 1)
-
-
-def sinusoidal(positions: torch.Tensor, dim: int) -> torch.Tensor:
-    half = dim // 2
-    freqs = torch.exp(-math.log(10000.0) * torch.arange(half, device=positions.device) / max(half - 1, 1))
-    ang = positions.float().unsqueeze(-1) * freqs
-    return torch.cat([torch.sin(ang), torch.cos(ang)], dim=-1)

@@ -180,7 +180,9 @@ def code_digest() -> str:
     return h.hexdigest()
 
 
-def runtime_record() -> dict[str, Any]:
+def runtime_record(cuda_devices: bool = True) -> dict[str, Any]:
+    """Environment record.  ``cuda_devices=False`` avoids touching CUDA in this process (the
+    scheduler driver) and lists GPUs through nvidia-smi only."""
     rec: dict[str, Any] = {
         "python": sys.version.split()[0],
         "platform": platform.platform(),
@@ -193,7 +195,7 @@ def runtime_record() -> dict[str, Any]:
         "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
         "code_digest": code_digest(),
     }
-    if torch.cuda.is_available():
+    if cuda_devices and torch.cuda.is_available():
         rec["gpus"] = [torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())]
     try:
         rec["nvidia_smi"] = subprocess.run(

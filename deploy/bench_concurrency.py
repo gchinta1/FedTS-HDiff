@@ -50,8 +50,13 @@ def main() -> int:
     ap.add_argument("--counts", default="1,2,4,8")
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
-    dev = a.device or os.environ.get("CUDA_VISIBLE_DEVICES", "0").split(",")[0]
-    env = {**os.environ, "CUDA_VISIBLE_DEVICES": dev, "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"}
+    dev = a.device or os.environ.get("CUDA_VISIBLE_DEVICES", "").split(",")[0]
+    if not dev:
+        raise SystemExit("pass --device or set CUDA_VISIBLE_DEVICES (never defaults to GPU 0)")
+    if dev in {g.strip() for g in os.environ.get("FEDTS_FORBID_GPUS", "").split(",")}:
+        raise SystemExit(f"GPU {dev} is forbidden (FEDTS_FORBID_GPUS)")
+    env = {**os.environ, "CUDA_VISIBLE_DEVICES": dev, "CUDA_DEVICE_ORDER": "PCI_BUS_ID", "OMP_NUM_THREADS": "1",
+           "MKL_NUM_THREADS": "1"}
     results = {}
     for k in (int(c) for c in a.counts.split(",")):
         procs = [subprocess.Popen([sys.executable, "-c", CHILD, a.dataset, a.data_root, str(a.seconds)],

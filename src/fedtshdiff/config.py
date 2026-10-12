@@ -13,6 +13,7 @@ be reused on resume.
 from __future__ import annotations
 
 import dataclasses
+import functools
 import hashlib
 import json
 from dataclasses import dataclass, field, fields, replace
@@ -50,7 +51,8 @@ OPT_STATE = ("persistent", "reset")
 ASSIGN_ORDER = ("fixed", "shuffled")
 
 # Fields that never change scientific results and are excluded from the fingerprint.
-NON_SCIENTIFIC = frozenset({"name", "data_root", "device", "eval_batch", "save_checkpoint", "tags", "client_batch"})
+# eval_batch is scientific: ancestral (DDPM) sampling draws its step noise chunk by chunk.
+NON_SCIENTIFIC = frozenset({"name", "data_root", "device", "save_checkpoint", "tags", "client_batch"})
 
 
 @dataclass(frozen=True)
@@ -73,6 +75,9 @@ class Config:
     split_seed: int = 123
     test_ratio: float = 0.2
     val_ratio: float = 0.0  # fraction of each client's training part held out for tuning
+    # windows dropped between the training block and the next held-out block (time split) so no
+    # training window contains a held-out forecast target; -1 = ceil(future_len / stride) - 1
+    split_gap: int = -1
 
     # ---- model --------------------------------------------------------------------
     model: str = "unet"
@@ -212,6 +217,10 @@ class Config:
             raise ValueError("fedrep_head_epochs must be smaller than local_epochs")
         if self.method == "cfl" and self.participation < 1.0:
             raise ValueError("cfl is implemented for full participation")
+        if self.method == "central" and self.drift_rounds:
+            raise ValueError("central trains on a merged copy of the data that drift events do not update")
+        if self.diag_rounds and self.method in ("cfl", "fedrep", "central"):
+            raise ValueError("gradient diagnostics are defined at a single global model (not cfl/fedrep/central)")
         if self.model == "unet" and self.future_len % 4:
             raise ValueError("the UNet pools twice: future_len must be divisible by 4")
         if self.past_len != self.future_len and self.model == "unet":
@@ -302,6 +311,11 @@ def load_yaml(path: str | Path) -> dict[str, Any]:
 
 def dataset_defaults(dataset: str) -> dict[str, Any]:
     """Paper settings for ``dataset`` (``configs/<dataset>.yaml`` shipped with the package)."""
+    return dict(_dataset_defaults_cached(dataset))
+
+
+@functools.lru_cache(maxsize=None)
+def _dataset_defaults_cached(dataset: str) -> dict[str, Any]:
     path = PACKAGE_CONFIG_DIR / f"{dataset}.yaml"
     return load_yaml(path) if path.exists() else {"dataset": dataset}
 

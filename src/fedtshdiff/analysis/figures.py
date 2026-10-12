@@ -144,11 +144,12 @@ def scalability(runs: pd.DataFrame, out: Path, metric: str = "crps") -> None:
     ax[0].set_ylabel(metric.upper())
     ax[0].legend(fontsize=6)
     ax[0].grid(alpha=0.3)
-    for lab, col in (("scale_fedavg", "k"), ("scale_hdiff_N\\d+_K4$", "#41ab5d"), ("kappa2", "#d95f02")):
+    curves = ((r"scale_fedavg_N\d+$", "k", "FedAvg"), (r"scale_hdiff_N\d+_K4$", "#41ab5d", "FedTS-HDiff K=4"),
+              (r"_kappa2$", "#d95f02", "FedTS-HDiff K=4, kappa=2"))  # full participation only (no _q suffix)
+    for lab, col, name in curves:
         g = d[d["label"].str.contains(lab)].groupby("N")["cost_mean_bytes_cloud"]
         if len(g):
-            ax[1].plot(g.mean().index, g.mean() / 2**20, marker="o", color=col,
-                       label={"scale_fedavg": "FedAvg", "kappa2": "FedTS-HDiff K=4, kappa=2"}.get(lab, "FedTS-HDiff K=4"))
+            ax[1].plot(g.mean().index, g.mean() / 2**20, marker="o", color=col, label=name)
     ax[1].set_xscale("log", base=2)
     ax[1].set_yscale("log")
     ax[1].set_xlabel("Number of clients N")
