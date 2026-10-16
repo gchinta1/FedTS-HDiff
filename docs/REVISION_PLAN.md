@@ -60,6 +60,37 @@ data-proportional weights, the update does not depend on the partition (Remark 3
 partition therefore affects convergence only through B_w (adaptive weights) or through κ > 1,
 where δ_in enters the edge-level drift term.
 
+## Follow-up screen (after round 1; agreed with the co-authors, October 2026)
+
+Round 1 showed FedTS-HDiff ≡ FedAvg up to the fourth decimal on three datasets (also under the submitted
+protocol): with κ = 1 and near data-proportional weights the two-level aggregation is a weighted FedAvg
+(Remark 3). The screen tests the two mechanisms that can make the hierarchy differ:
+
+| Question | Evidence (group → artefact) |
+|---|---|
+| Does κ > 1 help at equal computation, and does the grouping rule matter then? | `screen` (`screen_{balance,similarity,kmeans}_k{1,2,5,10}`) → `tab_screen`, `fig_screen`, `tab_screen_tests_equal_compute.csv` |
+| Accuracy per unit of cloud traffic | `screen_fedavg_c{κ}` → `tab_screen_tests_equal_cloud.csv`, `fig_screen` (CRPS vs total cloud MB) |
+| Group-level personalisation (personalised baselines won round 1) | `screen_pers_m0.0_k1`, `screen_pers_m0.5_k{1,5}` → `tab_screen` |
+
+Launch: `fedts campaign --only screen` (171 runs, MIT-BIH/METR-LA/PTB-XL × 3 seeds). Configurations
+that beat both FedAvg references are then confirmed with 5 seeds (and on Electricity).
+
+## Personalised hierarchy (after the screen, October 2026)
+
+The screen showed that the hierarchy keeps FedAvg's accuracy at a fraction of the cloud traffic but does
+not improve it, while client-level personalisation (FedRep) is the largest accuracy lever in round 1 and
+the diagnostics show that groups capture only a small part of the client heterogeneity. The `personal`
+group (100 runs) showed that personal heads on the hierarchy match FedRep on all four datasets at
+120–375× less cloud traffic; they lose to FedAvg on PTB-XL. The `phsel` group adds the validation switch,
+the shared-head hierarchy at the same settings and an ablation of the small gain over FedRep on MIT-BIH.
+
+| Question | Evidence (group → artefact) |
+|---|---|
+| FedRep-level accuracy at hierarchical cloud traffic? | `ph_client_k{1,5}` vs `ph_fedrep` → `tab_personal`, `tab_personal_tests_vs_fedrep.csv`, `fig_personal` |
+| Does choosing personal heads on validation avoid the PTB-XL loss? | `phval_*` → `tab_personal_selection.csv`; `ph_sel_k*` in `tab_personal` |
+| Effect of personal heads within the same hierarchy | `ph_off_k*` vs `ph_client_k*` |
+| Why personal heads on the hierarchy beat FedRep on MIT-BIH | `pha_*` → `tab_personal_ablation` |
+
 ## Suggested order of work
 1. `preflight`, then `cost` + `tune` (cost needs idle GPUs; tuning gates the dependent groups).
 2. `main` + `ablation` (largest; gives R1-3, R2-3, R2-5, R2-8, R2-9).

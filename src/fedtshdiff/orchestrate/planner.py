@@ -21,7 +21,7 @@ from ..utils import atomic_write_json, read_json
 from .suites import GROUPS, PAPER_DEFAULTS, SELECT_METRIC, TUNE_SEED, TUNING_GRID, TaskSpec
 
 GROUP_PRIORITY = {"cost": 0, "tune": 1, "main": 2, "ablation": 3, "descriptors": 4, "drift": 5, "generative": 6,
-                  "scalability": 7, "reproduce": 8, "smoke": 0}
+                  "scalability": 7, "reproduce": 8, "smoke": 0, "screen": 2, "personal": 2, "phsel": 2}
 
 
 @dataclass
@@ -128,16 +128,17 @@ def resolve_config(spec: TaskSpec, data_root: str, selections: dict[str, Any]) -
 
 
 def build_plan(root: Path, specs: list[TaskSpec], data_root: str,
-               fallback_hashes: dict[str, str] | None = None) -> Plan:
-    """``fallback_hashes`` supplies the data hash of datasets not prepared under ``data_root``
-    (analysis of exported results on another machine)."""
+               recorded_hashes: dict[str, str] | None = None) -> Plan:
+    """``recorded_hashes`` (dataset -> data hash recorded by sealed runs) take precedence over the
+    data prepared under ``data_root``: the analysis validates results against the data they were
+    produced from, on any machine.  The scheduler passes none and uses its own prepared data."""
     root = Path(root)
     hashes: dict[str, str] = {}
     for ds in sorted({s.dataset for s in specs}):
-        if (dataset_dir(data_root, ds) / "SHA256SUMS").exists():
+        if recorded_hashes and ds in recorded_hashes:
+            hashes[ds] = recorded_hashes[ds]
+        elif (dataset_dir(data_root, ds) / "SHA256SUMS").exists():
             hashes[ds] = data_hash(data_root, ds)
-        elif fallback_hashes and ds in fallback_hashes:
-            hashes[ds] = fallback_hashes[ds]
     planned: list[PlannedTask] = []
     fingerprints: dict[str, str] = {}
     # first pass: tasks without selections (tuning runs included)

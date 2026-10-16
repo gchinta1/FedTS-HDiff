@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from pathlib import Path
 from typing import Iterable
 
@@ -366,3 +367,234 @@ def convergence_table(curves: pd.DataFrame, out: Path, labels: tuple[str, ...] =
         lines += ["\\bottomrule", "\\end{tabular}", "\\vspace{2mm}", ""]
     lines += ["}", "\\end{table}", ""]
     _write(out, "tab_convergence", "\n".join(lines), t)
+
+
+# Follow-up screen: grouping x edge rounds at equal computation, plus group personalisation.
+
+SCREEN_KINDS = ("fedavg", "fedavg_comm", "hier", "pers")
+
+
+def screen_parse(label: str) -> tuple[str, int | None, str]:
+    """Screen label -> (configuration name, kappa, kind), kind in SCREEN_KINDS."""
+    if label == "screen_fedavg":
+        return "FedAvg ($R$ rounds)", None, "fedavg"
+    if m := re.fullmatch(r"screen_fedavg_c(\d+)", label):
+        return f"FedAvg ($R/{m.group(1)}$ rounds)", int(m.group(1)), "fedavg_comm"
+    if m := re.fullmatch(r"screen_pers_m([\d.]+)_k(\d+)", label):
+        return f"Group-personalised (mix {m.group(1)})", int(m.group(2)), "pers"
+    if m := re.fullmatch(r"screen_([a-z]+)_k(\d+)", label):
+        return f"{m.group(1).capitalize()} grouping", int(m.group(2)), "hier"
+    raise ValueError(f"not a screen label: {label}")
+
+
+def screen_runs(df: pd.DataFrame) -> pd.DataFrame:
+    """Complete screen rows (a task shared with another group may carry non-screen labels too)."""
+    d = df[(df["group"] == "screen") & df["label"].str.startswith("screen_")]
+    return d.drop_duplicates(subset=["task_id", "label"])
+
+
+def _screen_key(label: str) -> tuple:
+    name, k, kind = screen_parse(label)
+    return SCREEN_KINDS.index(kind), name if kind in ("hier", "pers") else "", k or 0
+
+
+def screen_table(df: pd.DataFrame, out: Path, metrics: tuple[str, ...] = ("crps", "dtw_mean")) -> pd.DataFrame:
+    d = screen_runs(df)
+    ok = d[d["status"] == "complete"]
+    if ok.empty:
+        return ok
+    summ = seed_summary(d, ["dataset", "label"], list(metrics) + ["cost_total_bytes_cloud"])
+    vs_comp = paired_tests(ok, "screen_fedavg", metrics)
+    blocks = []  # equal cloud rounds: kappa-edge-round runs against FedAvg with R/kappa rounds
+    for k in sorted({screen_parse(l)[1] for l in ok["label"] if screen_parse(l)[2] == "fedavg_comm"}):
+        sub = ok[ok["label"].map(lambda l, k=k: screen_parse(l)[1] == k)]
+        blocks.append(paired_tests(sub, f"screen_fedavg_c{k}", metrics))
+    vs_comm = pd.concat(blocks, ignore_index=True) if blocks else pd.DataFrame()
+    out.mkdir(parents=True, exist_ok=True)
+    vs_comp.to_csv(out / "tab_screen_tests_equal_compute.csv", index=False)
+    vs_comm.to_csv(out / "tab_screen_tests_equal_cloud.csv", index=False)
+
+    def delta(tests: pd.DataFrame, ds: str, lab: str) -> str:
+        t = tests[(tests["dataset"] == ds) & (tests["metric"] == metrics[0]) & (tests["label"] == lab)] \
+            if len(tests) else tests
+        if t.empty:
+            return "--"
+        r = t.iloc[0]
+        return f"{r['mean_diff']:+.4f}" + ("$^\\dagger$" if r["p_t_holm"] < 0.05 else "")
+
+    m0, m1 = METRICS[metrics[0]][0], METRICS[metrics[1]][0]
+    lines = ["\\begin{table}[t]", "\\centering",
+             "\\caption{Hierarchical screen at equal local computation: $\\kappa$ edge rounds per cloud round and "
+             "$R/\\kappa$ cloud rounds (mean $\\pm$ SD over seeds). $\\Delta$: seed-paired difference in "
+             f"{m0} to FedAvg with the same computation ($R$ rounds) and with the same number of cloud rounds "
+             "($R/\\kappa$); negative is better, $^\\dagger$ Holm-adjusted $p<0.05$. Cloud: total traffic through "
+             "the cloud server over training.}", "\\label{tab:screen}", "\\resizebox{\\columnwidth}{!}{",
+             "\\begin{tabular}{llccccccc}", "\\toprule",
+             f"Dataset & Configuration & $\\kappa$ & Cloud (MB) & {m0} $\\downarrow$ & $\\Delta$ FedAvg($R$) & "
+             f"$\\Delta$ FedAvg($R/\\kappa$) & {m1} $\\downarrow$ \\\\", "\\midrule"]
+    for ds in DATASET_NAMES:
+        s = summ[summ["dataset"] == ds].set_index("label")
+        for j, lab in enumerate(sorted(s.index, key=_screen_key)):
+            name, k, kind = screen_parse(lab)
+            r = s.loc[lab]
+            mb = r.get("cost_total_bytes_cloud_mean", math.nan) / 2**20
+            comp = "--" if kind == "fedavg" else delta(vs_comp, ds, lab)
+            comm = delta(vs_comm, ds, lab) if kind in ("hier", "pers") and k and k > 1 else "--"
+            lines.append(f"{DATASET_NAMES[ds] if j == 0 else ''} & {name} & {'--' if k is None or kind == 'fedavg_comm' else k} & "
+                         f"{'--' if math.isnan(mb) else f'{mb:,.0f}'} & "
+                         f"{_fmt(r.get(f'{metrics[0]}_mean'), r.get(f'{metrics[0]}_sd'))} & {comp} & {comm} & "
+                         f"{_fmt(r.get(f'{metrics[1]}_mean'), r.get(f'{metrics[1]}_sd'))} \\\\")
+        if len(s):
+            lines.append("\\midrule")
+    lines[-1] = "\\bottomrule"
+    lines += ["\\end{tabular}}", "\\end{table}", ""]
+    _write(out, "tab_screen", "\n".join(lines), summ)
+    return summ
+
+
+# Personalised hierarchy: client heads (and, from the phsel group, the same hierarchy with a shared head,
+# the validation switch between the two, and the MIT-BIH ablation) against FedRep, clustered FL, FedAvg.
+
+PERSONAL_GROUPS = ("personal", "phsel")
+PERSONAL_ORDER = ["ph_fedavg", "ph_cfl", "ph_fedrep", "ph_off_k1", "ph_off_k5", "ph_client_k1", "ph_client_k5",
+                  "ph_sel_k1", "ph_sel_k5"]
+PERSONAL_NAMES = {"ph_fedavg": "FedAvg", "ph_cfl": "Clustered FL", "ph_fedrep": "FedRep",
+                  "ph_off": "FedTS-HDiff, shared head", "ph_client": "FedTS-HDiff, personal heads",
+                  "ph_sel": "FedTS-HDiff, heads chosen on validation"}
+ABLATION_PH = {"ph_fedrep": "FedRep (flat)", "pha_beta0": "Similarity groups, data weights ($\\beta{=}0$)",
+               "pha_nogroup": "No grouping ($K{=}1$), adaptive weights",
+               "pha_balance": "Balance grouping, adaptive weights",
+               "ph_client_k1": "Similarity groups, adaptive weights (full)"}
+
+
+def personal_parse(label: str) -> tuple[str, int | None]:
+    """ph label -> (display name, kappa); kappa is None for the flat references."""
+    if m := re.fullmatch(r"(ph_\w+?)_k(\d+)", label):
+        return PERSONAL_NAMES[m.group(1)], int(m.group(2))
+    return PERSONAL_NAMES[label], None
+
+
+def _personal_rows(df: pd.DataFrame) -> pd.DataFrame:
+    return df[df["group"].isin(PERSONAL_GROUPS)].drop_duplicates(subset=["task_id", "label"])
+
+
+def personal_selection(df: pd.DataFrame) -> pd.DataFrame:
+    """Per dataset: validation CRPS with personal heads on / off (tuning seed) and the choice
+    (the lower validation CRPS; a tie keeps the shared head)."""
+    d = _personal_rows(df)
+    d = d[(d["status"] == "complete") & d["label"].isin(["phval_on", "phval_off"])]
+    rows = []
+    for ds, g in d.groupby("dataset"):
+        v = g.set_index("label")["crps"]
+        if {"phval_on", "phval_off"} <= set(v.index):
+            rows.append({"dataset": ds, "val_crps_on": float(v["phval_on"]), "val_crps_off": float(v["phval_off"]),
+                         "personal_heads": bool(v["phval_on"] < v["phval_off"])})
+    return pd.DataFrame(rows, columns=["dataset", "val_crps_on", "val_crps_off", "personal_heads"])
+
+
+def personal_runs(df: pd.DataFrame) -> pd.DataFrame:
+    """Test rows of the personal comparison, plus ph_sel_k* = the validation-selected variant's rows."""
+    d = _personal_rows(df)
+    d = d[d["label"].isin(PERSONAL_ORDER)]
+    sel = personal_selection(df)
+    extra = []
+    for r in sel.itertuples():
+        src = "ph_client" if r.personal_heads else "ph_off"
+        for k in (1, 5):
+            rows = d[(d["dataset"] == r.dataset) & (d["label"] == f"{src}_k{k}")].copy()
+            rows["label"] = f"ph_sel_k{k}"
+            extra.append(rows)
+    return pd.concat([d, *extra], ignore_index=True) if extra else d
+
+
+def personal_table(df: pd.DataFrame, out: Path,
+                   metrics: tuple[str, ...] = ("crps", "dtw_mean", "wis_90", "picp_90")) -> pd.DataFrame:
+    d = personal_runs(df)
+    ok = d[d["status"] == "complete"]
+    if ok.empty:
+        return ok
+    summ = seed_summary(d, ["dataset", "label"], list(metrics) + ["cost_total_bytes_cloud"])
+    vs_avg = paired_tests(ok, "ph_fedavg", metrics)
+    vs_rep = paired_tests(ok, "ph_fedrep", metrics)
+    out.mkdir(parents=True, exist_ok=True)
+    vs_avg.to_csv(out / "tab_personal_tests_vs_fedavg.csv", index=False)
+    vs_rep.to_csv(out / "tab_personal_tests_vs_fedrep.csv", index=False)
+    sel = personal_selection(df)
+    if len(sel):
+        sel.to_csv(out / "tab_personal_selection.csv", index=False)
+
+    def delta(tests: pd.DataFrame, ds: str, lab: str) -> str:
+        t = tests[(tests["dataset"] == ds) & (tests["metric"] == "crps") & (tests["label"] == lab)] \
+            if len(tests) else tests
+        if t.empty:
+            return "--"
+        r = t.iloc[0]
+        return f"{r['mean_diff']:+.4f}" + ("$^\\dagger$" if r["p_t_holm"] < 0.05 else "")
+
+    lines = ["\\begin{table}[t]", "\\centering",
+             "\\caption{Personalised hierarchy: every client keeps its own output head and the body is aggregated "
+             "through $\\kappa$ edge rounds per cloud round ($R/\\kappa$ cloud rounds, equal computation); "
+             "shared head: the same hierarchy without personal heads; chosen on validation: personal heads on or "
+             "off per dataset by validation CRPS. Mean $\\pm$ SD over seeds; $\\Delta$: seed-paired CRPS "
+             "difference to FedAvg and to FedRep (negative is better, $^\\dagger$ Holm-adjusted $p<0.05$). "
+             "Cloud: total traffic through the cloud server over training.}",
+             "\\label{tab:personal}", "\\resizebox{\\columnwidth}{!}{", "\\begin{tabular}{llcccccccc}",
+             "\\toprule",
+             "Dataset & Method & $\\kappa$ & Cloud (MB) & CRPS $\\downarrow$ & $\\Delta$ FedAvg & $\\Delta$ FedRep & "
+             "DTW $\\downarrow$ & WIS$_{90}$ $\\downarrow$ & PICP$_{90}$ \\\\", "\\midrule"]
+    for ds in DATASET_NAMES:
+        s = summ[summ["dataset"] == ds].set_index("label")
+        labs = [l for l in PERSONAL_ORDER if l in s.index]
+        for j, lab in enumerate(labs):
+            name, k = personal_parse(lab)
+            if lab.startswith("ph_sel") and len(sel) and ds in set(sel["dataset"]):
+                on = bool(sel.set_index("dataset").loc[ds, "personal_heads"])
+                name += " (personal)" if on else " (shared)"
+            r = s.loc[lab]
+            mb = r.get("cost_total_bytes_cloud_mean", math.nan) / 2**20
+            cells = [_fmt(r.get(f"{m}_mean"), r.get(f"{m}_sd"), 3 if m == "picp_90" else 4) for m in metrics]
+            lines.append(f"{DATASET_NAMES[ds] if j == 0 else ''} & {name} & {k or '--'} & "
+                         f"{'--' if math.isnan(mb) else f'{mb:,.0f}'} & {cells[0]} & "
+                         f"{'--' if lab == 'ph_fedavg' else delta(vs_avg, ds, lab)} & "
+                         f"{'--' if lab == 'ph_fedrep' else delta(vs_rep, ds, lab)} & " + " & ".join(cells[1:]) + " \\\\")
+        if labs:
+            lines.append("\\midrule")
+    lines[-1] = "\\bottomrule"
+    lines += ["\\end{tabular}}", "\\end{table}", ""]
+    _write(out, "tab_personal", "\n".join(lines), summ)
+    return summ
+
+
+def personal_ablation_table(df: pd.DataFrame, out: Path, dataset: str | None = None,
+                            metrics: tuple[str, ...] = ("crps", "dtw_mean", "wis_90")) -> pd.DataFrame:
+    """What makes client heads on the hierarchy differ from FedRep (kappa = 1).  Default dataset: MIT-BIH,
+    else the first one with ablation runs."""
+    d = _personal_rows(df)
+    have = sorted(set(d.loc[d["label"].str.startswith("pha_"), "dataset"]))
+    if not have:
+        return pd.DataFrame()
+    dataset = dataset or ("mitbih" if "mitbih" in have else have[0])
+    d = d[(d["dataset"] == dataset) & d["label"].isin(ABLATION_PH)]
+    summ = seed_summary(d, ["dataset", "label"], list(metrics))
+    tests = paired_tests(d[d["status"] == "complete"], "ph_fedrep", metrics)
+    out.mkdir(parents=True, exist_ok=True)
+    tests.to_csv(out / "tab_personal_ablation_tests.csv", index=False)
+    s = summ.set_index("label")
+    lines = ["\\begin{table}[t]", "\\centering",
+             f"\\caption{{Personal heads on the hierarchy ($\\kappa{{=}}1$) on {DATASET_NAMES[dataset]}: which "
+             "component separates it from FedRep. With data-proportional weights and one edge round the hierarchy "
+             "is algebraically FedRep. $\\Delta$: seed-paired CRPS difference to FedRep ($^\\dagger$ Holm $p<0.05$).}",
+             "\\label{tab:personal_ablation}", "\\begin{tabular}{lcccc}", "\\toprule",
+             "Variant & CRPS $\\downarrow$ & $\\Delta$ FedRep & DTW $\\downarrow$ & WIS$_{90}$ $\\downarrow$ \\\\",
+             "\\midrule"]
+    for lab, name in ABLATION_PH.items():
+        if lab not in s.index:
+            continue
+        r = s.loc[lab]
+        t = tests[(tests["metric"] == "crps") & (tests["label"] == lab)] if len(tests) else tests
+        dl = "--" if t.empty else f"{t.iloc[0]['mean_diff']:+.4f}" + ("$^\\dagger$" if t.iloc[0]["p_t_holm"] < 0.05 else "")
+        lines.append(f"{name} & {_fmt(r.get('crps_mean'), r.get('crps_sd'))} & {dl} & "
+                     f"{_fmt(r.get('dtw_mean_mean'), r.get('dtw_mean_sd'))} & {_fmt(r.get('wis_90_mean'), r.get('wis_90_sd'))} \\\\")
+    lines += ["\\bottomrule", "\\end{tabular}", "\\end{table}", ""]
+    _write(out, "tab_personal_ablation", "\n".join(lines), summ)
+    return summ

@@ -67,6 +67,49 @@ Campaign groups, in scheduling priority order:
 | `scalability` | 90 | PTB-XL: N clients × K edges, κ = 2, partial participation (R2-10) |
 | `reproduce` | 24 | the submitted protocol (legacy DDIM spacing, MIT-BIH linear forms, METR-LA random split) |
 
+**Follow-up screen** (`screen`, opt-in, not part of the default 656 runs; agreed with the co-authors after
+round 1). 171 runs: MIT-BIH, METR-LA and PTB-XL (signal descriptors) × 19 configurations × seeds 1–3, all
+at equal local computation (κ edge rounds per cloud round, R/κ cloud rounds):
+
+| Labels | Configurations |
+|---|---|
+| `screen_fedavg` | FedAvg, R rounds (same computation) |
+| `screen_fedavg_c{2,5,10}` | FedAvg, R/κ rounds (same number of cloud rounds as κ edge rounds) |
+| `screen_{balance,similarity,kmeans}_k{1,2,5,10}` | FedTS-HDiff with that grouping and κ, β = the round-1 validation choice |
+| `screen_pers_m0.0_k1`, `screen_pers_m0.5_k{1,5}` | group personalisation: static similarity groups keep their own edge models (`edge_mix`, below); with m = 0 κ only changes the random draws, so it runs at κ = 1 only |
+
+`edge_mix` = m < 1 makes each edge start a cloud round from m·global + (1 − m)·its own previous edge model,
+and evaluates every client with that mixed model of its edge (m = 0: independent group models; m = 1:
+standard FedTS-HDiff, and the field is then left out of the fingerprint). It needs static groups
+(`regroup_every=0`). Analysis: `tab_screen` (CRPS/DTW, total cloud traffic, paired ΔCRPS against both
+FedAvg references with Holm-adjusted p) and `fig_screen` (CRPS against total cloud traffic).
+
+```bash
+fedts campaign --root results/screen --data-root data --gpus auto --only screen [--datasets ptbxl,metrla]
+fedts preflight --root results/preflight-screen --data-root data --gpus auto --only screen
+```
+
+**Personalised hierarchy** (`personal`, then `phsel`; opt-in). With `personal_head=true`, FedTS-HDiff
+trains like FedRep locally (`fedrep_head_epochs` on the output head, then the body), every client keeps
+its own head and is evaluated with it, and only the body goes through the edge → cloud hierarchy. With
+κ = 1 and data-proportional weights this is exactly FedRep, whatever the grouping (`tests/test_personal.py`).
+
+| Group | Labels | Configurations |
+|---|---|---|
+| `personal` (100 runs) | `ph_fedavg`, `ph_fedrep`, `ph_cfl` | flat references, R rounds, 4 datasets × seeds 1–5 |
+| | `ph_client_k{1,5}` | personal heads, κ edge rounds, R/κ cloud rounds |
+| `phsel` (63 runs) | `phval_on`, `phval_off` | validation runs (tuning seed, κ = 5): personal heads on / off |
+| | `ph_off_k{1,5}` | the same hierarchy with a shared head, seeds 1–5 |
+| | `pha_beta0`, `pha_nogroup`, `pha_balance` | MIT-BIH, κ = 1: data weights; no grouping; balance grouping |
+
+All use static similarity groups and β at its round-1 validation choice. The analysis adds
+`ph_sel_k{1,5}` (personal heads on or off per dataset by validation CRPS) and writes `tab_personal`
+(CRPS, DTW, WIS, PICP, total cloud MB, paired ΔCRPS vs FedAvg and vs FedRep), `tab_personal_selection`,
+`tab_personal_ablation` and `fig_personal`. The `phsel` root is analysed together with the `personal`
+export: `fedts analyse --root <phsel root> --reference-runs <personal export>/analysis/runs.csv`.
+Release `d9ec7fd3a876` also ran group and mixed heads (`ph_group_*`, `ph_mix_*`); they were removed
+(docs/METHODS.md, §3b).
+
 Tasks that need a tuned value wait until the tuning runs for that (dataset, method) are sealed.
 The selection is then written to `selection/<dataset>__<method>.json`. Identical configurations
 requested by several groups run once.
@@ -111,6 +154,19 @@ bash setup_gcore.sh fedtshdiff-<digest>.zip      # verify, private venv (copy of
 FEDTS_SLOTS=2 ~/FedTS-HDiff/run_gcore.sh start   # tmux session fedts-rev; CUDA_VISIBLE_DEVICES=1..7
 ~/FedTS-HDiff/run_gcore.sh status
 ~/FedTS-HDiff/run_gcore.sh analyse && ~/FedTS-HDiff/run_gcore.sh export
+
+# follow-up screen (new release; its own root results/screen-<version>; the start command refuses
+# while any of GPUs 1-7 is busy)
+bash setup_gcore.sh fedtshdiff-<digest>.zip
+~/FedTS-HDiff/run_gcore.sh preflight screen
+FEDTS_CAMPAIGN=screen ~/FedTS-HDiff/run_gcore.sh dry-run screen     # 171 runs
+FEDTS_CAMPAIGN=screen FEDTS_SLOTS=2 ~/FedTS-HDiff/run_gcore.sh start screen
+FEDTS_CAMPAIGN=screen ~/FedTS-HDiff/run_gcore.sh status            # also analyse / export
+FEDTS_VERSION=8385228cff1b ~/FedTS-HDiff/run_gcore.sh status        # round 1 after ACTIVE_VERSION moved on
+
+# personalised hierarchy (same pattern, own roots results/<campaign>-<version>)
+~/FedTS-HDiff/run_gcore.sh preflight phsel
+FEDTS_CAMPAIGN=phsel FEDTS_SLOTS=2 ~/FedTS-HDiff/run_gcore.sh start phsel         # 63 runs
 ```
 
 ## Code map

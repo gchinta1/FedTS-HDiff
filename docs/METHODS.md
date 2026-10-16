@@ -46,6 +46,62 @@
 | `edge_rounds2` | κ = 2 edge rounds per cloud round, R/2 cloud rounds | same local computation, half the cloud traffic |
 | DDIM 25/50/100 | evaluation of the full model with fewer steps | no retraining |
 
+## 3a. Follow-up screen (group `screen`)
+
+All configurations perform the same local computation: R × E epochs per client. FedTS-HDiff runs κ ∈
+{1, 2, 5, 10} edge rounds per cloud round for R/κ cloud rounds. Two FedAvg references: R rounds (same
+computation, cloud traffic 2NP per round) and R/κ rounds (same number of cloud rounds as the hierarchical
+run with κ edge rounds; it does half, a fifth or a tenth of the computation). Total cloud traffic is
+2KP · R/κ for the hierarchy (K edge models up and down per cloud round) and 2NP · R for FedAvg (P = model
+bytes). Groupings: balance (the submitted rule), similarity and k-means (static, as in round 1's
+ablation), with β fixed at its round-1 validation selection (MIT-BIH 2, PTB-XL/METR-LA 0.5). PTB-XL
+uses the signal descriptors (single-label clients make the label histogram uninformative). Seeds 1–3;
+convergence curves every R/10 rounds of the run.
+
+**Group personalisation** (`edge_mix` = m). Groups are formed once from all clients (similarity
+grouping, `regroup_every=0`) and every edge k keeps a model θ_k. In a cloud round, edge k starts from
+m·θ_g + (1 − m)·θ_k, runs its κ edge rounds, stores the result as θ_k, and the cloud model θ_g is the
+q-weighted mean of the edge models. A client is evaluated with m·θ_g + (1 − m)·θ_k of its edge (as CFL is
+evaluated with its cluster's model). m = 0 trains independent group models (CFL with the hierarchy's
+grouping and weights); m = 0.5 shares half of the global model every round. Screened at m = 0 (κ = 1; with m = 0
+the global model never feeds back, so κ only changes the random draws) and m = 0.5 (κ ∈ {1, 5}).
+
+Statistics: seed-paired t-tests against `screen_fedavg` (equal computation, Holm over the 18
+configurations of a dataset and metric) and against `screen_fedavg_c{κ}` (equal cloud rounds, Holm
+within each κ). With 3 seeds this is a screen: configurations that look promising are confirmed with
+seeds 1–5.
+
+## 3b. Personalised hierarchy (groups `personal` and `phsel`)
+
+`personal_head=true` combines FedRep's split with the hierarchy. The U-Net's output convolution is the
+head, everything else the body. In every edge round a client starts from its edge's body and its own
+head, trains `fedrep_head_epochs` (1) epoch on the head with the body frozen and E − 1 epochs on the
+body with the head frozen, as FedRep does. Edges aggregate the bodies with the FedTS-HDiff weights, the
+cloud aggregates edge bodies, and every client is evaluated with the global body and its own head. The
+head never leaves the client, so client links carry |body| per edge round and the cloud 2K·|body| per
+cloud round. With κ = 1 and data-proportional weights the update of the body is FedAvg's, so the method
+is exactly FedRep for any grouping (unit-tested); differences come from κ > 1 and the adaptive weights.
+
+*Validation switch.* Personal heads help where clients differ in ways the head can absorb and hurt where
+clients have few windows (PTB-XL: 72 per client). Per dataset, the hierarchy with personal heads and with
+a shared head are trained once at the tuning seed (κ = 5) and evaluated on the validation split; the
+variant with the lower validation CRPS is used (ties: shared head), for both κ.
+
+*Ablation (MIT-BIH, κ = 1).* Data-proportional weights (algebraically FedRep), adaptive weights without
+grouping (one edge), and balance instead of similarity grouping, against the full configuration.
+
+Grid: personal and shared heads at κ ∈ {1, 5} (R/κ cloud rounds, equal computation), with flat FedAvg,
+FedRep and clustered FL; four datasets, seeds 1–5, PTB-XL with signal descriptors. Paired tests against
+FedAvg and FedRep, Holm-adjusted per dataset and metric.
+
+*Dropped variant.* Release `d9ec7fd3a876` also shared heads within groups: a client started each local
+phase from λ·own head + (1 − λ)·edge head and was evaluated with λ·own + (1 − λ)·group head (λ = 0.5 and
+0). Both were worse than FedAvg on MIT-BIH, METR-LA and Electricity. The body is trained against each
+client's freshly adapted head but was evaluated with an averaged one, so the two do not match; in
+addition, the edge head at the first edge round of a cloud round was the global head, so for κ = 1 the
+group head entered only the evaluation. The variant was removed rather than repaired: the only dataset
+where it could help is PTB-XL, where clustered FL bounds the gain from group-level models at about 1%.
+
 ## 4. Descriptors
 
 * **label**: client label histogram (MIT-BIH: beat symbols; PTB-XL: diagnostic superclass).

@@ -13,7 +13,8 @@ fedrep      shared body, personal head; head epochs then body epochs (Collins et
 fedtdd      adapted FedTDD: model averaging plus an exchanged pool of fully synthetic windows
             (two-step generation f1 = G(past), f2 = G(f1), window = [f1 | f2]) mixed into
             local training with weight lambda (Soi et al., 2024; see docs/METHODS.md)
-fedts_hdiff hierarchical: grouping -> kappa edge rounds -> cloud aggregation (ours)
+fedts_hdiff hierarchical: grouping -> kappa edge rounds -> cloud aggregation (ours); with
+            personal_head, FedRep-style personal output heads on a hierarchically aggregated body
 cfl         clustered FL: static k-means of descriptors, one model per cluster
 central     one pseudo-client holding the union of all training data
 """
@@ -46,7 +47,7 @@ class ClientState:
     opt: OptState | None = None
     h: torch.Tensor | None = None  # feddyn
     c: torch.Tensor | None = None  # scaffold
-    head: torch.Tensor | None = None  # fedrep personal head
+    head: torch.Tensor | None = None  # fedrep / personal_head: the client's own head
 
 
 @dataclass
@@ -112,13 +113,16 @@ class FederatedTrainer:
         self.phi: np.ndarray | None = None
         self.grouper: Grouper | None = None
         self.last_assignment: Assignment | None = None
+        self.edge_models: list[torch.Tensor] | None = None  # group personalisation (edge_mix < 1)
         if self.method in ("fedts_hdiff", "cfl"):
             self.refresh_descriptors()
         # method state
         self.server_h = torch.zeros_like(self.global_vec) if self.method == "feddyn" else None
         self.server_c = torch.zeros_like(self.global_vec) if self.method == "scaffold" else None
         self.syn_pool: dict[int, torch.Tensor] = {}
-        if self.method == "fedrep":
+        # FedRep-style body/head training: fedrep, and FedTS-HDiff with personal heads
+        self.rep = self.method == "fedrep" or cfg.personal_head
+        if self.rep:
             self.head_slice = self.opt.slices["head"]
             self.body_slice = self.opt.slices["body"]
         if self.method == "cfl":
@@ -190,7 +194,7 @@ class FederatedTrainer:
             fm.flat[self.head_slice].copy_(st.head if st.head is not None else start[self.head_slice])
         for e in range(E):
             segment = "all"
-            if self.method == "fedrep":
+            if self.rep:
                 segment = "head" if e < cfg.fedrep_head_epochs else "body"
             perm = torch.randperm(n, device=self.device, generator=gen)
             for b in range(0, n, cfg.batch_size):
@@ -203,7 +207,7 @@ class FederatedTrainer:
         if not math.isfinite(mean_loss) or not torch.isfinite(fm.flat).all():
             raise Diverged(f"client {client.cid}: non-finite loss/parameters")
         vec = fm.snapshot()
-        if self.method == "fedrep":
+        if self.rep:
             st.head = vec[self.head_slice].clone()
         self._post_local(i, start, vec, steps)
         return LocalResult(vec, steps, mean_loss, seconds)
@@ -363,7 +367,7 @@ class FederatedTrainer:
             if m == "fedtdd":
                 self.syn_pool = new_pool
         P = self.param_bytes
-        up = len(parts) * (P if m != "fedrep" else (self.body_slice.stop - self.body_slice.start) * 4)
+        up = len(parts) * (P if m != "fedrep" else self.body_bytes)
         extra_up = 0
         if m == "scaffold":
             extra_up = len(parts) * P
@@ -389,7 +393,13 @@ class FederatedTrainer:
         self.last_assignment = asg
         K = len(asg.edges)
         start = self.global_vec
-        edge_vecs = [start.clone() for _ in range(K)]
+        mix = cfg.edge_mix
+        if mix < 1.0:  # persistent edge models, pulled towards the global model by edge_mix
+            if self.edge_models is None:
+                self.edge_models = [start.clone() for _ in range(K)]
+            edge_vecs = [self._edge_model(k) for k in range(K)]
+        else:
+            edge_vecs = [start.clone() for _ in range(K)]
         losses, weights, secs_parallel, secs_sum = [], [], 0.0, 0.0
         within, between = 0.0, 0.0
         edge_of = asg.edge_of()
@@ -400,7 +410,11 @@ class FederatedTrainer:
             sqs = [0.0] * K
             with self.watch.time("local"):
                 # index order, independent of the partition (same streams as flat methods)
-                results = self.train_many(order, [edge_vecs[edge_of[i]] for i in order], sub=s)
+                if cfg.personal_head:
+                    starts = [self._personal_start(i, edge_vecs[edge_of[i]]) for i in order]
+                else:
+                    starts = [edge_vecs[edge_of[i]] for i in order]
+                results = self.train_many(order, starts, sub=s)
                 for i, res in zip(order, results):
                     k = edge_of[i]
                     w = asg.client_weight[i]
@@ -429,8 +443,13 @@ class FederatedTrainer:
             for k in range(K):
                 if edge_means[k] is not None:
                     between += asg.edge_weight[k] * float((edge_means[k] - glob_delta).pow(2).sum())
+            if mix < 1.0:
+                for k in range(K):
+                    if asg.edges[k]:
+                        self.edge_models[k] = edge_vecs[k].clone()
             self.global_vec = new
         P, m, d = self.param_bytes, len(parts), self.phi.shape[1]
+        shared = self.body_bytes if cfg.personal_head else P  # personal heads never leave the client
         eff = asg.effective_weights()
         p = self.sizes[parts] / self.sizes[parts].sum()
         a = np.array([eff[i] for i in parts])
@@ -440,8 +459,9 @@ class FederatedTrainer:
             "edge_weights": asg.edge_weight.tolist(),
             "update_disp_within": within, "update_disp_between": between,
             "eff_weight_l1_from_p": float(np.abs(a - p).sum()),
-            "bytes_client_up": cfg.edge_rounds * m * P + m * d * 4, "bytes_client_down": cfg.edge_rounds * m * P,
-            "bytes_cloud": 2 * sum(1 for e in asg.edges if e) * P,
+            "bytes_client_up": cfg.edge_rounds * m * shared + m * d * 4,
+            "bytes_client_down": cfg.edge_rounds * m * shared,
+            "bytes_cloud": 2 * sum(1 for e in asg.edges if e) * shared,
             "local_seconds_sum": secs_sum, "local_seconds_max": secs_parallel,
         }
         return RoundLog(r, float(np.average(losses, weights=weights)), m, stats)
@@ -480,8 +500,30 @@ class FederatedTrainer:
     # ----------------------------------------------------------------------------------
     # Models used for evaluation
     # ----------------------------------------------------------------------------------
+    @property
+    def body_bytes(self) -> int:
+        return (self.body_slice.stop - self.body_slice.start) * 4
+
+    def _personal_start(self, i: int, edge_vec: torch.Tensor) -> torch.Tensor:
+        """Start of client i's local phase under personal heads: the edge's body with the client's own
+        head (a client that has not trained yet starts from the edge head)."""
+        vec = edge_vec.clone()
+        own = self.state(i).head
+        if own is not None:
+            vec[self.head_slice] = own
+        return vec
+
+    def _edge_model(self, k: int) -> torch.Tensor:
+        """Model of edge k under group personalisation: edge_mix * global + (1 - edge_mix) * edge model."""
+        mix = self.cfg.edge_mix
+        return mix * self.global_vec + (1.0 - mix) * self.edge_models[k]
+
     def model_groups(self, client_indices: np.ndarray) -> list[tuple[torch.Tensor, np.ndarray]]:
         """(parameter vector, positions in ``client_indices`` it must serve) pairs."""
+        if self.cfg.edge_mix < 1.0 and self.edge_models is not None:
+            edge_of = np.array([self.grouper._static[int(c)] for c in client_indices])
+            return [(self._edge_model(k), np.flatnonzero(edge_of == k))
+                    for k in range(len(self.edge_models)) if np.any(edge_of == k)]
         if self.method == "cfl":
             out = []
             for k, vec in enumerate(self.cluster_vecs):
@@ -489,7 +531,7 @@ class FederatedTrainer:
                 if pos.size:
                     out.append((vec, pos))
             return out
-        if self.method == "fedrep":
+        if self.rep:
             out = []
             for ci in np.unique(client_indices):
                 vec = self.global_vec.clone()
@@ -505,6 +547,9 @@ class FederatedTrainer:
         if self.method == "cfl":
             out["clusters"] = [v.cpu() for v in self.cluster_vecs]
             out["cluster_of"] = self.cluster_of
-        if self.method == "fedrep":
+        if self.rep:
             out["heads"] = {i: st.head.cpu() for i, st in self.states.items() if st.head is not None}
+        if self.edge_models is not None:
+            out["edge_models"] = [self._edge_model(k).cpu() for k in range(len(self.edge_models))]
+            out["edge_of"] = dict(self.grouper._static)
         return out

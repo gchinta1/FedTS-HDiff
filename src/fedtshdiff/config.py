@@ -53,6 +53,9 @@ ASSIGN_ORDER = ("fixed", "shuffled")
 # Fields that never change scientific results and are excluded from the fingerprint.
 # eval_batch is scientific: ancestral (DDPM) sampling draws its step noise chunk by chunk.
 NON_SCIENTIFIC = frozenset({"name", "data_root", "device", "save_checkpoint", "tags", "client_batch"})
+# Fields added after the first campaign: omitted from the fingerprint while at these defaults, so
+# configurations that do not use them keep their fingerprints (and completed roots stay valid).
+FINGERPRINT_DEFAULT_OMIT: dict[str, Any] = {"edge_mix": 1.0, "personal_head": False}
 
 
 @dataclass(frozen=True)
@@ -137,6 +140,15 @@ class Config:
     beta_agg: float = 1.0
     edge_weighting: str = "homogeneity"
     homogeneity_ref: str = "auto"  # auto: uniform for label descriptors (paper), mean otherwise
+    # Group-level personalisation (needs static groups): each edge keeps its own model; at every cloud
+    # round an edge starts from edge_mix * global + (1 - edge_mix) * its previous edge model, and its
+    # clients are evaluated with that mixture.  1.0 = standard FedTS-HDiff (edges restart from global),
+    # 0.0 = independent group models (clustered FL on the similarity partition).
+    edge_mix: float = 1.0
+    # Personalised hierarchy: every client keeps its own output head (FedRep-style local schedule:
+    # fedrep_head_epochs on the head, then the body) and is evaluated with it; only the body is
+    # aggregated (edges, then cloud), so the head never leaves the client.
+    personal_head: bool = False
 
     # ---- baselines ----------------------------------------------------------------
     prox_mu: float = 0.01
@@ -219,6 +231,17 @@ class Config:
             raise ValueError("cfl is implemented for full participation")
         if self.method == "central" and self.drift_rounds:
             raise ValueError("central trains on a merged copy of the data that drift events do not update")
+        if not 0.0 <= self.edge_mix <= 1.0:
+            raise ValueError("edge_mix must be in [0, 1]")
+        if self.edge_mix < 1.0 and (self.method != "fedts_hdiff" or self.regroup_every != 0 or self.diag_rounds):
+            raise ValueError("edge_mix < 1 (group personalisation) needs method=fedts_hdiff, static groups "
+                             "(regroup_every=0) and no gradient diagnostics")
+        if self.personal_head:
+            if self.method != "fedts_hdiff" or self.model != "unet" or self.edge_mix < 1.0 or self.diag_rounds:
+                raise ValueError("personal_head needs method=fedts_hdiff, model=unet, edge_mix=1 and no "
+                                 "gradient diagnostics")
+            if self.fedrep_head_epochs >= self.local_epochs:
+                raise ValueError("fedrep_head_epochs must be smaller than local_epochs")
         if self.diag_rounds and self.method in ("cfl", "fedrep", "central"):
             raise ValueError("gradient diagnostics are defined at a single global model (not cfl/fedrep/central)")
         if self.model == "unet" and self.future_len % 4:
@@ -236,7 +259,8 @@ class Config:
         return out
 
     def scientific_dict(self) -> dict[str, Any]:
-        return {k: v for k, v in self.to_dict().items() if k not in NON_SCIENTIFIC}
+        return {k: v for k, v in self.to_dict().items()
+                if k not in NON_SCIENTIFIC and not (k in FINGERPRINT_DEFAULT_OMIT and v == FINGERPRINT_DEFAULT_OMIT[k])}
 
     def fingerprint(self, extra: Mapping[str, Any] | None = None) -> str:
         payload = {"config": self.scientific_dict(), "extra": dict(extra or {})}

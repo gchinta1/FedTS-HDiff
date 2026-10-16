@@ -30,6 +30,13 @@ REVIEWER_MAP = [
     ("R2-C10 scalability", ["tab_scalability.tex", "fig_scalability.pdf"]),
     ("R2-C11 configurations", ["selections.csv", "configs/"]),
     ("Sec. 5.8 concept drift", ["tab_drift.tex", "fig_drift.pdf"]),
+    ("Follow-up screen: grouping x edge rounds at equal computation, group personalisation",
+     ["tab_screen.tex", "tab_screen_tests_equal_compute.csv", "tab_screen_tests_equal_cloud.csv", "fig_screen.pdf"]),
+    ("Personalised hierarchy: personal heads, shared head, validation switch vs FedRep, clustered FL, FedAvg",
+     ["tab_personal.tex", "tab_personal_tests_vs_fedavg.csv", "tab_personal_tests_vs_fedrep.csv",
+      "tab_personal_selection.csv", "fig_personal.pdf"]),
+    ("Personal heads vs FedRep: ablation of grouping and adaptive weights (MIT-BIH)",
+     ["tab_personal_ablation.tex", "tab_personal_ablation_tests.csv"]),
 ]
 
 
@@ -78,12 +85,27 @@ def selections(root: Path, out: Path) -> pd.DataFrame:
     return t
 
 
-def analyse(root: str | Path, data_root: str | Path | None = None) -> Path:
+def _add_reference_runs(runs: pd.DataFrame, paths: list[str | Path]) -> pd.DataFrame:
+    """Append rows of earlier campaigns' exported runs.csv (validated when they were collected) that the
+    current root does not have itself (same dataset, seed, group and label)."""
+    frames = [runs]
+    have = set(zip(runs["dataset"], runs["seed"], runs["group"], runs["label"])) if len(runs) else set()
+    for p in paths:
+        ref = pd.read_csv(p)
+        keep = [k not in have for k in zip(ref["dataset"], ref["seed"], ref["group"], ref["label"])]
+        frames.append(ref[keep].assign(source=str(p)))
+    return pd.concat(frames, ignore_index=True)
+
+
+def analyse(root: str | Path, data_root: str | Path | None = None,
+            reference_runs: list[str | Path] | None = None) -> Path:
     root = Path(root)
     out = root / "analysis"
     tdir, fdir = out / "tables", out / "figures"
     tdir.mkdir(parents=True, exist_ok=True)
     res = collect(root, data_root)
+    if reference_runs:
+        res.runs = _add_reference_runs(res.runs, reference_runs)
     if res.runs.empty:
         (out / "report.md").write_text("# FedTS-HDiff revision analysis\n\nNo sealed runs yet.\n", encoding="utf-8")
         return out
@@ -143,6 +165,13 @@ def analyse(root: str | Path, data_root: str | Path | None = None) -> Path:
                             list(tables.DATASET_NAMES), tables.MAIN_METRICS,
                             "Submitted protocol (legacy DDIM spacing, original MIT-BIH forms, random METR-LA split).",
                             "tab_reproduce", tdir, reference="repro_fedts_hdiff")
+    if (res.runs["group"] == "screen").any():
+        tables.screen_table(res.runs, tdir)
+        figures.screen(res.runs, fdir)
+    if res.runs["group"].isin(tables.PERSONAL_GROUPS).any():
+        tables.personal_table(res.runs, tdir)
+        tables.personal_ablation_table(res.runs, tdir)
+        figures.personal(res.runs, fdir)
     tables.cost_table(res.runs, tdir)
     tables.scalability_table(res.runs, tdir)
     figures.scalability(res.runs, fdir)

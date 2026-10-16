@@ -165,7 +165,7 @@ def _draw_plan(tr: "FederatedTrainer", i: int, sub: int, pool: torch.Tensor | No
     plan = _Plan()
     for e in range(cfg.local_epochs):
         seg = "all"
-        if tr.method == "fedrep":
+        if tr.rep:
             seg = "head" if e < cfg.fedrep_head_epochs else "body"
         perm = torch.randperm(n, device=dev, generator=gen)
         for b0 in range(0, n, B):
@@ -330,7 +330,7 @@ def _train_chunk(tr, net: BatchedUNet, ids, starts, sub, Diverged, LocalResult):
                 if k:
                     states[c].steps[seg] = k
         vec = W[c].clone()
-        if m == "fedrep":
+        if tr.rep:
             tr.state(i).head = vec[tr.head_slice].clone()
         tr._post_local(i, starts[c], vec, plans[c].steps)
         results.append(LocalResult(vec, plans[c].steps, means[c], seconds))

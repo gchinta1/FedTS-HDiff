@@ -44,12 +44,12 @@ def _cmd_run(a: argparse.Namespace) -> int:
 
 
 def _specs(a: argparse.Namespace):
-    from .orchestrate.suites import DATASETS, GROUPS, SEEDS, campaign
+    from .orchestrate.suites import ALL_GROUPS, DATASETS, GROUPS, SEEDS, campaign
 
     groups = a.only.split(",") if a.only else list(GROUPS)
-    unknown = set(groups) - set(GROUPS)
+    unknown = set(groups) - set(ALL_GROUPS)
     if unknown:
-        raise SystemExit(f"unknown groups {sorted(unknown)}; choose from {GROUPS}")
+        raise SystemExit(f"unknown groups {sorted(unknown)}; choose from {ALL_GROUPS}")
     seeds = tuple(int(s) for s in a.seeds.split(",")) if a.seeds else SEEDS
     datasets = tuple(a.datasets.split(",")) if a.datasets else DATASETS
     return campaign(groups, tuned=not a.no_tuning, seeds=seeds, datasets=datasets)
@@ -120,12 +120,14 @@ def _cmd_preflight(a: argparse.Namespace) -> int:
     from .data.store import verify_prepared
     from .orchestrate.planner import build_plan, write_manifest
     from .orchestrate.scheduler import Scheduler, parse_slots
-    from .orchestrate.suites import DATASETS, smoke_campaign
+    from .orchestrate.suites import ALL_GROUPS, DATASETS, SMOKE_GROUPS, smoke_campaign
 
     root = Path(a.root).resolve()
     root.mkdir(parents=True, exist_ok=True)
     report: dict = {"runtime": runtime_record(), "checks": {}}
     datasets = a.datasets.split(",") if a.datasets else list(DATASETS)
+    if a.only and not set(a.only.split(",")) <= set(ALL_GROUPS):
+        raise SystemExit(f"unknown group in --only {a.only}; groups: {','.join(ALL_GROUPS)}")
     for ds in datasets:
         try:
             report["checks"][f"data:{ds}"] = verify_prepared(a.data_root, ds)
@@ -144,7 +146,10 @@ def _cmd_preflight(a: argparse.Namespace) -> int:
         atomic_write_json(root / "preflight.json", report)
         print("preflight failed:", bad)
         return 1
-    specs = smoke_campaign([d for d in datasets])
+    specs = smoke_campaign(datasets, a.only.split(",") if a.only else SMOKE_GROUPS)
+    if not specs:
+        print("preflight: no smoke runs for these groups/datasets")
+        return 1
     write_manifest(root, specs, {"data_root": str(Path(a.data_root).resolve()), "smoke": True})
     _print_plan(build_plan(root, specs, str(Path(a.data_root).resolve())))
     state = Scheduler(root, specs, str(Path(a.data_root).resolve()), slots, continue_on_error=True,
@@ -190,7 +195,7 @@ def _cmd_status(a: argparse.Namespace) -> int:
 def _cmd_analyse(a: argparse.Namespace) -> int:
     from .analysis.report import analyse
 
-    out = analyse(a.root, a.data_root)
+    out = analyse(a.root, a.data_root, a.reference_runs)
     print(f"report: {out / 'report.md'}")
     return 0
 
@@ -230,8 +235,8 @@ def main(argv: list[str] | None = None) -> int:
         s.add_argument("--forbid-gpus", help="comma-separated physical GPU ids that must never be used "
                                              "(default: $FEDTS_FORBID_GPUS)")
         s.add_argument("--datasets", help="comma-separated subset of mitbih,ptbxl,electricity,metrla")
+        s.add_argument("--only", help="comma-separated groups")
         if name == "campaign":
-            s.add_argument("--only", help="comma-separated groups")
             s.add_argument("--seeds")
             s.add_argument("--no-tuning", action="store_true", help="use the paper's baseline values")
             s.add_argument("--dry-run", action="store_true")
@@ -248,6 +253,9 @@ def main(argv: list[str] | None = None) -> int:
     s = sub.add_parser("analyse")
     s.add_argument("--root", required=True)
     s.add_argument("--data-root")
+    s.add_argument("--reference-runs", nargs="*", default=[],
+                   help="analysis/runs.csv of earlier campaigns whose rows complete the tables (e.g. the "
+                        "personal campaign's references for phsel)")
     s.set_defaults(fn=_cmd_analyse)
 
     s = sub.add_parser("describe-data")

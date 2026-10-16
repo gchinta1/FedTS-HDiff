@@ -188,3 +188,96 @@ def dispersion_bars(long: pd.DataFrame, out: Path) -> None:
         axes[0, j].grid(alpha=0.3, axis="y")
     axes[0, 0].set_ylabel(r"$\delta_{in}/\delta_{global}$")
     _save(fig, out, "fig_dispersion")
+
+
+SCREEN_COLORS = {"Balance grouping": "#2CA02C", "Similarity grouping": "#1f77b4", "Kmeans grouping": "#9467bd"}
+
+
+def screen(runs: pd.DataFrame, out: Path, metric: str = "crps") -> None:
+    """Metric against total cloud traffic at equal computation: one line per grouping over kappa, FedAvg over
+    R, R/2, R/5, R/10 rounds, group-personalised variants as stars."""
+    from .tables import screen_parse, screen_runs
+
+    d = screen_runs(runs)
+    d = d[d["status"] == "complete"].copy()
+    if d.empty:
+        return
+    parsed = [screen_parse(l) for l in d["label"]]
+    d["config"], d["kappa"], d["kind"] = [p[0] for p in parsed], [p[1] or 1 for p in parsed], [p[2] for p in parsed]
+    d["cloud_mb"] = d["cost_total_bytes_cloud"].astype(float) / 2**20
+    datasets = [x for x in DATASET_NAMES if x in set(d["dataset"])]
+    fig, axes = plt.subplots(1, len(datasets), figsize=(3.6 * len(datasets), 3.2), squeeze=False)
+    for j, ds in enumerate(datasets):
+        ax, sub = axes[0, j], d[d["dataset"] == ds]
+        fa = sub[sub["kind"].isin(["fedavg", "fedavg_comm"])].groupby("label")[["cloud_mb", metric]]
+        if len(fa):
+            m, sd = fa.mean().sort_values("cloud_mb"), fa.std(ddof=1)
+            ax.errorbar(m["cloud_mb"], m[metric], yerr=sd.loc[m.index, metric], color="k", marker="s", ms=3, lw=1,
+                        capsize=2, label="FedAvg ($R/\\kappa$ rounds)")
+        for name, col in SCREEN_COLORS.items():
+            g = sub[(sub["kind"] == "hier") & (sub["config"] == name)].groupby("kappa")[["cloud_mb", metric]]
+            if not len(g):
+                continue
+            m, sd = g.mean(), g.std(ddof=1)
+            ax.errorbar(m["cloud_mb"], m[metric], yerr=sd[metric], color=col, marker="o", ms=3, lw=1, capsize=2,
+                        label=name)
+            for k, row in m.iterrows():
+                ax.annotate(f"$\\kappa$={k}", (row["cloud_mb"], row[metric]), fontsize=5, xytext=(2, 2),
+                            textcoords="offset points", color=col)
+        pers = sub[sub["kind"] == "pers"].groupby("label")[["cloud_mb", metric]].mean()
+        for lab, row in pers.iterrows():
+            ax.scatter(row["cloud_mb"], row[metric], marker="*", s=40, color="#d62728", zorder=5)
+            ax.annotate(lab.replace("screen_pers_", ""), (row["cloud_mb"], row[metric]), fontsize=5, xytext=(2, -6),
+                        textcoords="offset points", color="#d62728")
+        ax.set_xscale("log")
+        ax.set_title(DATASET_NAMES[ds], fontsize=9)
+        ax.set_xlabel("Total cloud traffic (MB)", fontsize=8)
+        ax.set_ylabel(metric.upper(), fontsize=8)
+        ax.grid(alpha=0.3)
+        ax.tick_params(labelsize=7)
+    axes[0, -1].legend(fontsize=6)
+    _save(fig, out, "fig_screen")
+
+
+PERSONAL_COLORS = {"FedTS-HDiff, personal heads": "#2CA02C", "FedTS-HDiff, shared head": "#1f77b4"}
+PERSONAL_REFS = {"FedAvg": ("k", "s"), "Clustered FL": ("#8C8C8C", "D"), "FedRep": ("#d62728", "^")}
+
+
+def personal(runs: pd.DataFrame, out: Path, metric: str = "crps") -> None:
+    """Metric against total cloud traffic: flat references as single points, personal heads over kappa."""
+    from .tables import personal_parse, personal_runs
+
+    d = personal_runs(runs)
+    d = d[(d["status"] == "complete") & ~d["label"].str.startswith("ph_sel")].copy()
+    if d.empty:
+        return
+    parsed = [personal_parse(l) for l in d["label"]]
+    d["config"], d["kappa"] = [p[0] for p in parsed], [p[1] or 1 for p in parsed]
+    d["cloud_mb"] = d["cost_total_bytes_cloud"].astype(float) / 2**20
+    datasets = [x for x in DATASET_NAMES if x in set(d["dataset"])]
+    fig, axes = plt.subplots(1, len(datasets), figsize=(3.6 * len(datasets), 3.2), squeeze=False)
+    for j, ds in enumerate(datasets):
+        ax, sub = axes[0, j], d[d["dataset"] == ds]
+        for name, (col, mk) in PERSONAL_REFS.items():
+            g = sub[sub["config"] == name]
+            if len(g):
+                ax.errorbar(g["cloud_mb"].mean(), g[metric].mean(), yerr=g[metric].std(ddof=1), color=col, marker=mk,
+                            ms=4, capsize=2, ls="none", label=name)
+        for name, col in PERSONAL_COLORS.items():
+            g = sub[sub["config"] == name].groupby("kappa")[["cloud_mb", metric]]
+            if not len(g):
+                continue
+            m, sd = g.mean(), g.std(ddof=1)
+            ax.errorbar(m["cloud_mb"], m[metric], yerr=sd[metric], color=col, marker="o", ms=3, lw=1, capsize=2,
+                        label=name.replace("FedTS-HDiff, ", ""))
+            for k, row in m.iterrows():
+                ax.annotate(f"$\\kappa$={k}", (row["cloud_mb"], row[metric]), fontsize=5, xytext=(2, 2),
+                            textcoords="offset points", color=col)
+        ax.set_xscale("log")
+        ax.set_title(DATASET_NAMES[ds], fontsize=9)
+        ax.set_xlabel("Total cloud traffic (MB)", fontsize=8)
+        ax.set_ylabel(metric.upper(), fontsize=8)
+        ax.grid(alpha=0.3)
+        ax.tick_params(labelsize=7)
+    axes[0, -1].legend(fontsize=6)
+    _save(fig, out, "fig_personal")

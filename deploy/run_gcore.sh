@@ -3,7 +3,7 @@
 #
 #   run_gcore.sh prepare-data          download + preprocess the four datasets
 #   run_gcore.sh bench                 measure throughput at 1/2/4 workers per GPU (choose SLOTS)
-#   run_gcore.sh preflight             two-round smoke of every variant on the real data
+#   run_gcore.sh preflight [groups]    two-round smoke of every variant (of groups) on the real data
 #   run_gcore.sh dry-run [groups]      print the plan
 #   run_gcore.sh start [groups]        launch (or resume) the campaign in tmux session fedts-rev
 #   run_gcore.sh status                progress summary
@@ -11,13 +11,17 @@
 #   run_gcore.sh analyse               rebuild tables/figures/report from stored results
 #   run_gcore.sh export                tar.gz of analysis + sealed outputs (no checkpoints)
 #
+# FEDTS_CAMPAIGN names the results root (default revision): FEDTS_CAMPAIGN=screen keeps the follow-up
+# screen in results/screen-<version>; pass it to every command of that campaign (status, analyse, export).
+#
 # GPU 0 hosts the Demo2 model service and must never be used: every command runs with
 # CUDA_VISIBLE_DEVICES=1..7 and FEDTS_FORBID_GPUS=0, and the driver refuses forbidden slots.
 set -euo pipefail
 BASE=${FEDTS_BASE:-/home/ubuntu/FedTS-HDiff}
 VER=${FEDTS_VERSION:-$(cat "$BASE/ACTIVE_VERSION")}
 PY="$BASE/venvs/$VER/bin/python"
-ROOT=${FEDTS_ROOT:-$BASE/results/revision-$VER}
+CAMPAIGN=${FEDTS_CAMPAIGN:-revision}
+ROOT=${FEDTS_ROOT:-$BASE/results/$CAMPAIGN-$VER}
 DATA="$BASE/data"
 RAW="$BASE/raw"
 SLOTS=${FEDTS_SLOTS:-2}   # client-batched runs saturate a GPU alone; 2 lets unbatched baselines overlap
@@ -38,8 +42,8 @@ case "${1:-status}" in
     "$PY" "$BASE/releases/$VER/revision_code/deploy/bench_concurrency.py" --data-root "$DATA" \
         --out "$BASE/deployments/$VER/concurrency.json" ;;
   preflight)
-    "$PY" -m fedtshdiff.cli preflight --root "$BASE/results/preflight-$VER" --data-root "$DATA" --gpus auto \
-        --slots-per-gpu "$SLOTS" ;;
+    "$PY" -m fedtshdiff.cli preflight --root "$BASE/results/preflight-$VER${only:+-${only//,/-}}" --data-root "$DATA" --gpus auto \
+        --slots-per-gpu "$SLOTS" "${only_flag[@]}" ;;
   dry-run)
     "$PY" -m fedtshdiff.cli campaign --root "$ROOT" --data-root "$DATA" --gpus auto --slots-per-gpu "$SLOTS" \
         "${only_flag[@]}" --dry-run ;;
@@ -68,7 +72,7 @@ ${only_flag[*]} >> $ROOT/campaign.out 2>&1"
   analyse)
     CUDA_VISIBLE_DEVICES="" "$PY" -m fedtshdiff.cli analyse --root "$ROOT" --data-root "$DATA" ;;
   export)
-    out="$BASE/exports/revision-$VER-$(date -u +%Y%m%dT%H%M%SZ).tar.gz"
+    out="$BASE/exports/$CAMPAIGN-$VER-$(date -u +%Y%m%dT%H%M%SZ).tar.gz"
     mkdir -p "$BASE/exports"
     (cd "$ROOT" && tar --exclude='model.pt' --exclude='tasks' -czf "$out" analysis campaign.json status.json env.json \
         selection runs driver.log 2>/dev/null || true)

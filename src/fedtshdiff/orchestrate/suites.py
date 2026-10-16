@@ -34,6 +34,9 @@ SEEDS = (1, 2, 3, 4, 5)
 TUNE_SEED = 101
 SELECT_METRIC = "crps"
 GROUPS = ("tune", "main", "ablation", "descriptors", "scalability", "drift", "generative", "cost", "reproduce")
+# Follow-up groups: never part of the default campaign; launch them explicitly with --only.
+EXTRA_GROUPS = ("screen", "personal", "phsel")
+ALL_GROUPS = GROUPS + EXTRA_GROUPS
 
 # Extra hyperparameter of each method, tuned on validation with the same 3-point grid size.
 TUNING_GRID: dict[str, tuple[str, tuple[float, ...]]] = {
@@ -114,12 +117,16 @@ def _resolve_macros(ds: str, ov: dict[str, Any]) -> dict[str, Any]:
     out = dict(ov)
     if out.get("rounds") == "@half_rounds":
         out["rounds"] = max(1, _rounds(ds) // 2)
-    R = int(out.get("rounds", _rounds(ds)))  # the run's own round count, after halving
+    elif isinstance(out.get("rounds"), str) and out["rounds"].startswith("@div"):  # equal computation
+        out["rounds"] = max(1, _rounds(ds) // int(out["rounds"][4:]))
+    R = int(out.get("rounds", _rounds(ds)))  # the run's own round count, after halving/dividing
     for k, v in out.items():
         if v == "@diag":
             out[k] = sorted({1, min(25, R), max(1, R // 2), R + 1})
         elif v == "@rounds":
             out[k] = R
+        elif v == "@tenth":
+            out[k] = max(1, R // 10)
     return out
 
 
@@ -241,6 +248,12 @@ def campaign(groups: Iterable[str] = GROUPS, tuned: bool = True, seeds: Iterable
                 for label, ov in {"fedavg": {"method": "fedavg"}, "hdiff": {"method": "fedts_hdiff"}}.items():
                     specs.append(_with_selection(TaskSpec("scalability", f"scale_{label}_N{n_part}_q{q}", sds, s,
                                                           {**ov, "max_clients": n_part, "participation": q, **NO_CURVES}), tuned))
+    if "screen" in groups:
+        specs += screen_specs([d for d in datasets if d in SCREEN_DATASETS], seeds)
+    if "personal" in groups:
+        specs += personal_specs([d for d in datasets if d in PERSONAL_DATASETS], seeds)
+    if "phsel" in groups:
+        specs += phsel_specs([d for d in datasets if d in PERSONAL_DATASETS], seeds)
     if tuned:  # tasks that need a validation-selected value always bring their tuning runs along
         needed = {sel.split("__", 1)[0] for sp in specs for sel in sp.select.values()}
         have = {sp.dataset for sp in specs if sp.group == "tune"}
@@ -248,6 +261,105 @@ def campaign(groups: Iterable[str] = GROUPS, tuned: bool = True, seeds: Iterable
     for sp in specs:
         sp.overrides = _resolve_macros(sp.dataset, sp.overrides)
     return _dedupe(specs)
+
+
+# ---------------------------------------------------------------------------------------------
+# Screen (follow-up after round 1): grouping x edge rounds at equal computation, group
+# personalisation, and FedAvg references at equal computation and at equal cloud traffic.
+# ---------------------------------------------------------------------------------------------
+# descriptor per dataset: PTB-XL clients carry a single label, so they are grouped by signal statistics
+SCREEN_DATASETS: dict[str, dict[str, Any]] = {"mitbih": {}, "metrla": {}, "ptbxl": {"descriptor": "signal"},
+                                              "synthetic": {}}
+# beta_agg selected on validation CRPS in round 1 (results/revision-8385228cff1b/selection/*__fedts_hdiff.json)
+SCREEN_BETA = {"mitbih": 2.0, "ptbxl": 0.5, "metrla": 0.5, "electricity": 0.5, "synthetic": 1.0}
+SCREEN_GROUPINGS = ("balance", "similarity", "kmeans")
+SCREEN_KAPPA = (1, 2, 5, 10)
+# (edge_mix, kappa). With edge_mix = 0 the global model never feeds back into training, so kappa only
+# changes the random draws: independent group models are run once, at kappa = 1.
+SCREEN_PERS = ((0.0, 1), (0.5, 1), (0.5, 5))
+SCREEN_SEEDS = (1, 2, 3)
+CURVES_TENTH = {"eval_every": "@tenth"}  # 10 curve points per run (accuracy vs cloud traffic)
+
+
+def screen_specs(datasets: Iterable[str], seeds: Iterable[int]) -> list[TaskSpec]:
+    """Equal computation: kappa edge rounds per cloud round and R/kappa cloud rounds, so every
+    configuration performs R x E local epochs per client (FedAvg: R rounds).  FedAvg with R/kappa
+    rounds is the equal-cloud-traffic reference of hierarchical runs with kappa edge rounds and
+    K edges (cloud traffic per round: K vs N models)."""
+    seeds = tuple(s for s in SCREEN_SEEDS if s in tuple(seeds)) or tuple(seeds)[:1]
+    out: list[TaskSpec] = []
+    for ds in datasets:
+        base = {"beta_agg": SCREEN_BETA[ds], **SCREEN_DATASETS[ds], **CURVES_TENTH}
+        for s in seeds:
+            out.append(TaskSpec("screen", "screen_fedavg", ds, s, {"method": "fedavg", **CURVES_TENTH}))
+            for k in SCREEN_KAPPA[1:]:
+                out.append(TaskSpec("screen", f"screen_fedavg_c{k}", ds, s,
+                                    {"method": "fedavg", "rounds": f"@div{k}", **CURVES_TENTH}))
+            for g in SCREEN_GROUPINGS:
+                for k in SCREEN_KAPPA:
+                    out.append(TaskSpec("screen", f"screen_{g}_k{k}", ds, s,
+                                        {"method": "fedts_hdiff", "grouping": g, "edge_rounds": k,
+                                         "rounds": f"@div{k}", **base}))
+            for mix, k in SCREEN_PERS:
+                out.append(TaskSpec("screen", f"screen_pers_m{mix}_k{k}", ds, s,
+                                    {"method": "fedts_hdiff", "grouping": "similarity", "regroup_every": 0,
+                                     "edge_mix": mix, "edge_rounds": k, "rounds": f"@div{k}", **base}))
+    return out
+
+
+# Personalised hierarchy: client output heads on top of a hierarchically aggregated body, against flat
+# FedRep, clustered FL and FedAvg trained under the same protocol.  (Release d9ec7fd3a876 also ran group
+# and mixed heads, ph_group_* / ph_mix_*; they were dropped, see docs/METHODS.md.)
+PERSONAL_DATASETS: dict[str, dict[str, Any]] = {"mitbih": {}, "ptbxl": {"descriptor": "signal"}, "metrla": {},
+                                                "electricity": {}, "synthetic": {}}
+PERSONAL_KAPPA = (1, 5)
+
+
+def _personal_base(ds: str, personal: bool) -> dict[str, Any]:
+    """Static similarity groups, beta at its round-1 validation choice."""
+    return {"method": "fedts_hdiff", "grouping": "similarity", "regroup_every": 0, "personal_head": personal,
+            "beta_agg": SCREEN_BETA[ds], **PERSONAL_DATASETS[ds]}
+
+
+def personal_specs(datasets: Iterable[str], seeds: Iterable[int]) -> list[TaskSpec]:
+    """kappa edge rounds per cloud round for R/kappa cloud rounds (equal computation)."""
+    out: list[TaskSpec] = []
+    for ds in datasets:
+        for s in seeds:
+            for m in ("fedavg", "fedrep", "cfl"):
+                out.append(TaskSpec("personal", f"ph_{m}", ds, s, {"method": m, **CURVES_TENTH}))
+            for k in PERSONAL_KAPPA:
+                out.append(TaskSpec("personal", f"ph_client_k{k}", ds, s,
+                                    {**_personal_base(ds, True), "edge_rounds": k, "rounds": f"@div{k}",
+                                     **CURVES_TENTH}))
+    return out
+
+
+# Validation switch for personal heads, the same hierarchy with a shared head, and the MIT-BIH ablation of
+# client heads at kappa = 1.  The references and ph_client_* runs come from the `personal` campaign.
+PHSEL_VAL_KAPPA = 5
+
+
+def phsel_specs(datasets: Iterable[str], seeds: Iterable[int]) -> list[TaskSpec]:
+    out: list[TaskSpec] = []
+    for ds in datasets:
+        for on in (True, False):  # validation runs: personal heads on / off (tuning seed, validation split)
+            out.append(TaskSpec("phsel", f"phval_{'on' if on else 'off'}", ds, TUNE_SEED,
+                                {**_personal_base(ds, on), "edge_rounds": PHSEL_VAL_KAPPA,
+                                 "rounds": f"@div{PHSEL_VAL_KAPPA}", "eval_split": "val", "eval_extra_ddim": [],
+                                 **NO_CURVES}))
+        for s in seeds:
+            for k in PERSONAL_KAPPA:
+                out.append(TaskSpec("phsel", f"ph_off_k{k}", ds, s,
+                                    {**_personal_base(ds, False), "edge_rounds": k, "rounds": f"@div{k}",
+                                     **CURVES_TENTH}))
+            if ds in ("mitbih", "synthetic"):  # what makes client heads beat FedRep on MIT-BIH (kappa = 1)?
+                base = _personal_base(ds, True)
+                for label, ov in {"pha_beta0": {"beta_agg": 0.0},  # data weights: algebraically FedRep
+                                  "pha_nogroup": {"num_edges": 1},  # adaptive weights without grouping
+                                  "pha_balance": {"grouping": "balance", "regroup_every": 1}}.items():
+                    out.append(TaskSpec("phsel", label, ds, s, {**base, **ov, **CURVES_TENTH}))
+    return out
 
 
 def _dedupe(specs: list[TaskSpec]) -> list[TaskSpec]:
@@ -264,10 +376,12 @@ def _dedupe(specs: list[TaskSpec]) -> list[TaskSpec]:
     return list(by_id.values())
 
 
-def smoke_campaign(datasets: Iterable[str]) -> list[TaskSpec]:
-    """Two-round versions of every main/ablation/generative variant on real data (preflight)."""
-    specs = campaign(groups=("main", "ablation", "descriptors", "drift", "generative"), tuned=False,
-                     seeds=(1,), datasets=datasets)
+SMOKE_GROUPS = ("main", "ablation", "descriptors", "drift", "generative", "screen", "personal", "phsel")
+
+
+def smoke_campaign(datasets: Iterable[str], groups: Iterable[str] = SMOKE_GROUPS) -> list[TaskSpec]:
+    """Two-round versions of every variant of ``groups`` on real data (preflight)."""
+    specs = campaign(groups=tuple(groups), tuned=False, seeds=(1,), datasets=datasets)
     out = []
     for sp in specs:
         ov = dict(sp.overrides)

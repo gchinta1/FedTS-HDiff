@@ -38,7 +38,7 @@ def _task_rows(root: Path, data_root: str | Path | None = None) -> list[dict[str
 
     manifest = read_json(root / "campaign.json")
     data_root = str(data_root or manifest["data_root"])
-    # datasets not prepared on this machine: take the data hash recorded by the sealed runs
+    # validate against the data hash recorded by the sealed runs (local data may be prepared differently)
     fallback: dict[str, set[str]] = {}
     for t in manifest["tasks"]:
         meta = root / "runs" / t["task_id"] / "meta.json"

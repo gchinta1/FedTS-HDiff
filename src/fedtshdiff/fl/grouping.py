@@ -249,6 +249,7 @@ class Grouper:
         self.phi, self.sizes = phi, sizes
         self.n_bar = float(np.mean(sizes[sizes > 0])) if np.any(sizes > 0) else 1.0
         self._static: dict[int, int] | None = None
+        self._static_K = 0
 
     def update_descriptors(self, phi: np.ndarray, sizes: np.ndarray) -> None:
         self.phi, self.sizes = phi, sizes
@@ -266,7 +267,8 @@ class Grouper:
                 full = assign_edges(cfg, everyone, self.phi, self.sizes,
                                     reference(self.kind, self.phi, cfg.homogeneity_ref, self.sizes), self.n_bar, rng)
                 self._static = {i: k for k, mem in enumerate(full) for i in mem}
-            K = max(self._static.values()) + 1
+                self._static_K = len(full)  # fixed edge identities (also when an edge ends up empty)
+            K = self._static_K
             edges = [[] for _ in range(K)]
             for i in participants:
                 edges[self._static[i]].append(i)
